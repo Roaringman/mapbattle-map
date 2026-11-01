@@ -2,6 +2,8 @@ import { fromUtm32, toUtm32 } from './utm.js';
 
 // The game's WebSocket address comes from the invite link (?server=wss://...) or the join form.
 const DEFAULT_SERVER = new URLSearchParams(location.search).get('server') ?? 'ws://localhost:8090';
+// The message format this page understands; see PROTOCOL.md. Must match the game's MapSocketServer.ProtocolVersion.
+const PROTOCOL_VERSION = 1;
 const HEADING_LENGTH_M = 14;
 const HEARD_ARROW_LENGTH_M = 35;
 const HEARD_ARROW_HEAD_M = 8;
@@ -670,7 +672,7 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
   const setStatus = (text, state) => {
     status.textContent = text;
     status.dataset.state = state;
-    for (const b of document.querySelectorAll('.spawn-btn')) b.disabled = state !== 'connected';
+    for (const b of document.querySelectorAll('.spawn-btn')) b.disabled = state !== 'connected' && state !== 'warning';
   };
 
   // Back to the join screen, leaving the status line in a sensible state behind it.
@@ -706,7 +708,17 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     updateZonePanel(zoneDefs, []);
     ready = true;
     setStatus(`Connected to game${name ? ` as ${name}` : ''}`, 'connected');
+    warnOnVersionMismatch(msg.protocolVersion);
     onJoined();
+  };
+
+  // Keep playing on a mismatch, but say why things may look wrong and what to do about it.
+  const warnOnVersionMismatch = (gameVersion) => {
+    if (gameVersion === undefined || gameVersion === PROTOCOL_VERSION) return;
+    showToast(gameVersion > PROTOCOL_VERSION
+      ? 'The game is newer than this page. Refresh the page (Ctrl+F5).'
+      : 'The host is running an older game than this page. Ask them to update.', false);
+    setStatus(`Connected, but the game uses protocol v${gameVersion} and this page v${PROTOCOL_VERSION}`, 'warning');
   };
 
   const handleState = (msg) => {

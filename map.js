@@ -1199,7 +1199,9 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         const { x1, z1, x2, z2, show } = msg;
         supplyPlanes.push({ x1, z1, x2, z2, at: performance.now() / 1000, seconds: show > 0 ? show : 30 });
         drawSupplyPlanes(view.map, view.toLngLat);
-        showToast('Supply plane passed over — a crate is somewhere under the line', false);
+        showToast(msg.incoming
+          ? 'Supply plane incoming — a crate will drop somewhere under the line'
+          : 'Supply plane passed over — a crate is somewhere under the line', false);
       } else if (msg.t === 'playerKilled') {
         const now = performance.now() / 1000;
         playerRespawnAt = now + (msg.respawnIn ?? 0);

@@ -68,7 +68,7 @@ Connections that send nothing for 15 s are dropped without a reply.
 Order: `joinResult` (ok), then `welcome`, then `state` 10 times a second plus events as they happen. The client
 must ignore `state` and events until it has finished handling `welcome`.
 
-### `welcome` (once per connection)
+### `welcome` (after joining, and again after every `newGame`)
 
 ```json
 {
@@ -95,6 +95,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers and overlords take orders; later types may not. |
 | `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. |
 | `spawnZone` | The only place monsters may be spawned: centre (`x`, `z`) and side length `size`, a square aligned to the grid in the north-west corner of the play area. Optional; absent means anywhere in the play area. |
+| `game` | Optional. Number of this game in the session, starting at 1; goes up with every [New game](#new-game). |
 | `victory` | Optional. The win rule, for explaining it: first side to `target` victory points wins; holding every zone takes `secondsHoldingAll`, and each zone short of all multiplies that by `slowdownPerMissingZone`. See [Victory](#victory). |
 
 #### `area`
@@ -188,24 +189,32 @@ there. That is deliberate.
 | `killed` | `id`, `type`, `x`, `z` | One of the map player's monsters died there. |
 | `playerKilled` | `by`, `byType`, `x`, `z`, `respawnIn`, `deaths` | The FPS player died. `by`/`byType` is the monster that dealt the last hit and (`x`, `z`) where it saw them fall; all four are absent if no monster gets the credit. The player is out of the game (nothing can see them) for `respawnIn` seconds, then respawns at the start point. `deaths` is the new total. |
 | `yell` | `id`, `from`, `wave`, `x`, `z`, `range` | Monster `id` yelled at (`x`, `z`), heard within `range` m. `from` is the monster it was answering, or -1 if it started the alarm. Yells in one alarm share a `wave`. |
-| `supplyPlane` | `x1`, `z1`, `x2`, `z2`, `show` | A supply plane flew straight from (`x1`, `z1`) to (`x2`, `z2`) and has left the map. See below. |
+| `supplyPlane` | `x1`, `z1`, `x2`, `z2`, `show`, `incoming` | A supply plane is flying (`incoming: true`, sent as it appears) or flew (older games, sent after it left) straight from (`x1`, `z1`) to (`x2`, `z2`). See below. |
 | `gameOver` | `winner`, `player`, `monsters` | A side reached the victory target. `winner` is `player` (the FPS player), `monsters` (the map side) or `draw`; `player`/`monsters` are the final scores. Sent once; see [Victory](#victory). |
+| `newGame` | `game` | The host started a new game in the same session. Clear the old match; a fresh `welcome` follows. See [New game](#new-game). |
 | `orderResult` | `ok`, `target`, `kind`, `reason` | Sent **only when an `order` is refused** (`ok: false`); accepted orders show up in the next `state`. `target` and `kind` echo the order. See [Orders](#orders). |
 | `pong` | | Reply to `ping`. |
 
 #### `supplyPlane`
 
 ```json
-{ "t": "supplyPlane", "x1": 290.43, "z1": 360, "x2": -291.87, "z2": -360, "show": 30 }
+{ "t": "supplyPlane", "x1": 290.43, "z1": 360, "x2": -291.87, "z2": -360, "show": 45, "incoming": true }
 ```
 
-The FPS player spent supply points on an ammo drop. A plane flew a straight line across the whole map, from beyond
+The FPS player spent supply points on an ammo drop. A plane flies a straight line across the whole map, from beyond
 one edge to beyond the other (the endpoints are outside the play area; clip or let MapLibre draw past the edge),
-and dropped a crate on a parachute **somewhere below that line**. The message arrives once the plane has left,
-usually a few seconds before the crate lands.
+and drops a crate on a parachute **somewhere below that line**.
 
-- **Draw it as a trace of the route**: a line (e.g. dashed) that fades out over `show` seconds, then remove it.
-  Several can be on screen at once.
+**When it is sent (game side):** the moment the plane is spawned, before it reaches the play area, with
+`incoming: true`. The route is fixed when the plane spawns, so nothing else needs to wait. `show` counts from when
+the message is sent, so it should cover the flight plus the time the trace should stay up afterwards (e.g. flight
+time + 30 s). Older games sent the message only after the plane had left and without `incoming`; the client handles
+both.
+
+- **Draw it as a trace of the route** as soon as it arrives: a line (e.g. dashed) that fades out over `show`
+  seconds, then remove it. Several can be on screen at once.
+- **The plane's position along the line is not sent**, nor when the crate drops: either would narrow down the drop
+  point.
 - **The crate's position is never sent**, not in this message and not later. The client must not suggest an exact
   spot; the line is all the map player knows. The drop is always within about 45 m of where the FPS player called
   it, which is the hint: send monsters to sweep along the line.
@@ -229,8 +238,27 @@ this formula; the client should show them rather than compute its own.
 
 When a side reaches the target the game is over: the world freezes, `gameOver` is sent once, and every later `state`
 carries `victory.winner`, so a page that joins or reloads afterwards still knows. A tie in the same frame is a
-`draw`. After the game is over, `spawn` and `order` are refused with `The game is over`. The host starts a new game
-by pressing Play again (new password, new tunnel address).
+`draw`. After the game is over, `spawn` and `order` are refused with `The game is over`.
+
+#### New game
+
+```json
+{ "t": "newGame", "game": 2 }
+```
+
+The host can start a new game **in the same session** at any time (from the win screen, or mid-game from the host
+panel). The password and tunnel address stay the same and connected pages stay connected; nobody needs a new
+invite. The game sends `newGame`, then a complete new `welcome`, then `state` as usual. On `newGame` the client
+must drop everything from the previous game: monsters, kill and death markers, yells, plane traces, last-seen
+marker, orders, the end screen and any pending spawn or order. It then handles the `welcome` exactly as after
+joining (it may skip re-drawing the map if `area` hasn't changed).
+
+What the new game starts with: no monsters, energy back at its start value, every zone neutral, both victory
+scores 0, `deaths` 0, no group order, and the FPS player alive at the start point. Monster `id`s keep counting up
+across games, so an id is never reused within a session. `welcome.game` (and `newGame.game`) is the game number in
+this session, starting at 1; a page that reloads can compare it to tell a new game from the one it was showing.
+
+Pressing Play again in the editor is still a whole new session: new password, new tunnel address, everyone rejoins.
 
 ## 3. After joining: client → game
 

@@ -20,6 +20,12 @@
       max-height: calc(100% - 60px); overflow-y: auto; box-sizing: border-box;
       background: var(--panel); border: 1px solid #2c343d; border-radius: 8px; padding: 12px 14px; }
     .panel h1 { margin: 0 0 2px; font-size: 16px; letter-spacing: 0.02em; color: var(--accent); }
+    /* Compact panel: only what matters while playing (status, score, energy, orders). Default on phones. */
+    .panel.compact .more { display: none !important; }
+    #panel-toggle { float: right; margin: -2px -4px 0 8px; padding: 2px 8px; border-radius: 5px; cursor: pointer;
+      border: 1px solid #3a444f; background: #222a33; color: var(--dim); font: inherit; font-size: 12px; }
+    #panel-toggle:hover { color: var(--text); border-color: var(--accent); }
+    .maplibregl-popup { z-index: 2; } /* above the panel, so a spawn popup is never hidden behind it */
     .panel .dim, .maplibregl-popup .dim { color: var(--dim); font-size: 12px; }
     .panel label { display: flex; gap: 8px; align-items: center; margin-top: 8px; cursor: pointer; }
     #coords { margin-top: 10px; padding-top: 8px; border-top: 1px solid #2c343d; font-variant-numeric: tabular-nums; }
@@ -58,10 +64,16 @@
     .spawn-btn[data-type="overlord"] { --c: #4fd1c5; }
     .spawn-btn small { display: block; font-weight: 400; opacity: 0.75; }
     .spawn-btn:hover:not(:disabled) { border-color: var(--c); }
-    .spawn-btn.active { background: var(--c); color: #10141a; }
-    .spawn-btn.short:not(.active), .spawn-btn.full:not(.active) { opacity: 0.55; }
-    .spawn-btn.full [data-count] { color: #e07a5f; opacity: 1; }
+    .spawn-btn.short, .spawn-btn.full { opacity: 0.55; }
+    .spawn-btn.full small { color: #e07a5f; opacity: 1; }
     .spawn-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #army { font-size: 13px; font-variant-numeric: tabular-nums; }
+    .spawn-pop { min-width: 200px; }
+    .spawn-pop .spawn-buttons { margin: 8px 0 6px; }
+    .spawn-result { margin-top: 4px; font-size: 12px; color: #e07a5f; }
+    .spawn-result:empty { display: none; }
+    .spawn-result[data-ok="true"] { color: #6cc070; }
+    .maplibregl-popup-close-button { color: var(--text); font-size: 18px; padding: 0 6px; }
     .energy { height: 6px; margin: 8px 0 4px; border-radius: 3px; background: #2c343d; overflow: hidden; }
     #energy-fill { height: 100%; width: 0; background: #a77bff; transition: width 0.2s linear; }
     #toast { margin-top: 6px; font-size: 12px; color: #e07a5f; }
@@ -77,7 +89,7 @@
     .zone[data-player-held="true"] .zone-label { color: #ff8a80; }
     .zone[data-status="contested"] .zone-label { color: #ffb347; }
     .zone[data-status="reclaiming"] .zone-label { color: #ff5a4f; }
-    #map.spawning .maplibregl-canvas { cursor: crosshair !important; }
+    #map.placing .maplibregl-canvas { cursor: crosshair !important; }
     .order-box { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2c343d; }
     .order-box[hidden], #selected[hidden] { display: none; }
     .order-title { font-weight: 600; margin-bottom: 6px; }
@@ -141,17 +153,18 @@
     </form>
   </div>
   <div class="panel">
+    <button id="panel-toggle" type="button" aria-expanded="true">Less</button>
     <h1>MapBattle</h1>
-    <div id="summary" class="dim">Not connected</div>
+    <div id="summary" class="dim more">Not connected</div>
     <div id="connection" data-state="offline">Not connected</div>
     <div id="sighting" data-state="hidden"></div>
-    <div id="deaths"></div>
+    <div id="deaths" class="more"></div>
     <div id="victory" hidden>
       <div class="vp" data-side="monsters"><b>Monsters</b><span class="vp-bar"><span></span></span><span class="vp-num"></span></div>
       <div class="vp" data-side="player"><b>Player</b><span class="vp-bar"><span></span></span><span class="vp-num"></span></div>
       <div id="victory-note"></div>
     </div>
-    <div class="legend">
+    <div class="legend more">
       <span style="--c:#c9a27a">House</span>
       <span style="--c:#7d8a96">Outbuilding</span>
       <span style="--c:#a3875b">Farm</span>
@@ -159,17 +172,12 @@
       <span style="--c:#6cc070">Spawn zone</span>
     </div>
     <div class="spawn-box">
-      <div class="spawn-buttons">
-        <button class="spawn-btn" data-type="crawler" type="button" disabled title="Then click the map. Esc to stop.">
-          Crawler<small>cost <span data-cost>1</span><span data-count></span></small></button>
-        <button class="spawn-btn" data-type="overlord" type="button" disabled
-          title="Flies, sees 60 m all around, directs crawlers within 100 m to the player. Then click the map.">
-          Overlord<small>cost <span data-cost>3</span><span data-count></span></small></button>
-      </div>
+      <div id="army"></div>
       <div class="energy"><div id="energy-fill"></div></div>
       <div class="dim">Energy <span id="energy-text">–</span></div>
+      <div class="dim more">Tap a green spawn zone to bring in monsters.</div>
       <div id="toast" hidden></div>
-      <div id="zones"></div>
+      <div id="zones" class="more"></div>
     </div>
     <div id="orders" class="order-box" hidden>
       <div class="order-title">Orders <span id="order-who" class="dim"></span></div>
@@ -193,8 +201,9 @@
         </div>
       </div>
     </div>
-    <label><input type="checkbox" id="toggle-3d"> 3D buildings</label>    <button id="recenter" type="button">Recentre on play area</button>
-    <div id="coords" class="dim">Click the map to see game coordinates.</div>
+    <label class="more"><input type="checkbox" id="toggle-3d"> 3D buildings</label>
+    <button id="recenter" class="more" type="button">Recentre on play area</button>
+    <div id="coords" class="dim more">Click the map to see game coordinates.</div>
   </div>
   <script type="module" src="./map.js"></script>
 </body>

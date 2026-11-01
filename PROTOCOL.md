@@ -3,7 +3,11 @@
 The contract between the game (Unity, `MapSocketServer`, private repository) and this map client. It is the **only**
 link between the two: the client reads no game files. Anything one side sends must be described here.
 
-**Protocol version: 1** — `MapSocketServer.ProtocolVersion` in the game, `PROTOCOL_VERSION` in `map.js`.
+**Protocol version: 2** — `MapSocketServer.ProtocolVersion` in the game, `PROTOCOL_VERSION` in `map.js`.
+
+Version 2: monsters are spawned **into a spawn zone** (`spawn` sends `zone`, the game picks the spot) instead of at
+a clicked point, and the single `welcome.spawnZone` became the list `welcome.spawnZones` (two zones). See
+[Spawning](#spawning).
 
 ## Rules for changing it
 
@@ -79,7 +83,8 @@ must ignore `state` and events until it has finished handling `welcome`.
   "monsterTypes": [ { "type": "crawler", "cost": 1, "limit": 8, "orders": true },
                     { "type": "overlord", "cost": 3, "limit": 1, "orders": true } ],
   "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50 } ],
-  "spawnZone": { "x": -250, "z": 250, "size": 100 },
+  "spawnZones": [ { "id": 1, "name": "North-west", "x": -250, "z": 250, "size": 100 },
+                  { "id": 2, "name": "South-east", "x": 250, "z": -250, "size": 100 } ],
   "victory": { "target": 100, "secondsHoldingAll": 180, "slowdownPerMissingZone": 2 }
 }
 ```
@@ -94,7 +99,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `callRange` | Metres a monster's yell carries; used to draw the monster network. Optional. |
 | `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers and overlords take orders; later types may not. |
 | `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. |
-| `spawnZone` | The only place monsters may be spawned: centre (`x`, `z`) and side length `size`, a square aligned to the grid in the north-west corner of the play area. Optional; absent means anywhere in the play area. |
+| `spawnZones` | The places monsters are spawned into (two today): `id`, a short `name` for the popup, centre (`x`, `z`) and side length `size`, squares aligned to the grid. The game decides where they are. See [Spawning](#spawning). |
 | `game` | Optional. Number of this game in the session, starting at 1; goes up with every [New game](#new-game). |
 | `victory` | Optional. The win rule, for explaining it: first side to `target` victory points wins; holding every zone takes `secondsHoldingAll`, and each zone short of all multiplies that by `slowdownPerMissingZone`. See [Victory](#victory). |
 
@@ -185,7 +190,7 @@ there. That is deliberate.
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `spawnResult` | `ok`, `type`, `x`, `z`, `reason` | Reply to `spawn`. `reason` is a human-readable refusal, empty on success. |
+| `spawnResult` | `ok`, `type`, `zone`, `x`, `z`, `reason` | Reply to `spawn`. On success (`x`, `z`) is where the game put the monster; `reason` is a human-readable refusal, empty on success. |
 | `killed` | `id`, `type`, `x`, `z` | One of the map player's monsters died there. |
 | `playerKilled` | `by`, `byType`, `x`, `z`, `respawnIn`, `deaths` | The FPS player died. `by`/`byType` is the monster that dealt the last hit and (`x`, `z`) where it saw them fall; all four are absent if no monster gets the credit. The player is out of the game (nothing can see them) for `respawnIn` seconds, then respawns at the start point. `deaths` is the new total. |
 | `yell` | `id`, `from`, `wave`, `x`, `z`, `range` | Monster `id` yelled at (`x`, `z`), heard within `range` m. `from` is the monster it was answering, or -1 if it started the alarm. Yells in one alarm share a `wave`. |
@@ -264,7 +269,7 @@ Pressing Play again in the editor is still a whole new session: new password, ne
 
 | Message | Fields | Meaning |
 |---|---|---|
-| `spawn` | `type`, `x`, `z` | Ask to place a monster. The game checks every rule and replies with `spawnResult`. |
+| `spawn` | `type`, `zone` | Ask for a monster of `type` in spawn zone `zone` (an id from `welcome.spawnZones`). The game picks the spot, checks every rule and replies with `spawnResult`. See [Spawning](#spawning). |
 | `order` | `target`, `kind`, `x`, `z` | Give monsters an order. See [Orders](#orders). The game replies only on refusal (`orderResult`). |
 | `ping` | | Connection check; the game replies `pong`. |
 
@@ -319,9 +324,28 @@ Order refusal reasons: `No such monster`, `That monster doesn't take orders`, `O
 `No reachable ground near that point`, `Too many orders`, `Unknown order '…'`, `The game is over`. The client shows
 them as-is.
 
-## Spawn refusal reasons (current)
+### Spawning
 
-`Unknown monster type '…'`, `The game is over`, `The map is still loading`, `Outside the play area`, `Outside the spawn zone`,
-`Crawler limit reached (8)`, `Overlord limit reached (1)`, `Monster limit reached (12)`,
-`Not enough energy`, `Inside a building`, `Not walkable ground`, `Too close to the player`,
-`The player can see that spot`. The client shows them as-is; it should not depend on the exact wording.
+```json
+{ "t": "spawn", "type": "crawler", "zone": 2 }
+{ "t": "spawnResult", "ok": true, "type": "crawler", "zone": 2, "x": 233.5, "z": -261.25, "reason": "" }
+```
+
+The map player doesn't place monsters: they pick a spawn zone, then a monster type, and the game puts the monster
+at a **random spot inside that zone**. This keeps the map player's attention on moving monsters (orders) rather than
+on placing them.
+
+**Rules the game enforces:**
+
+1. `zone` must be an id from `welcome.spawnZones`; the type must be spawnable; the usual energy and per-type limits
+   apply.
+2. The game picks a random point inside the zone square that is walkable ground, not inside a building, not within
+   the minimum distance of the FPS player and not visible to them. It tries several random points; if none
+   qualifies it refuses with `No free spot in that spawn zone`. Overlords (flying) only need a point inside the zone.
+3. Each `spawn` is one monster; several in a row each get their own random spot.
+4. The new monster joins the current group order, if any (see [Orders](#orders)).
+
+Spawn refusal reasons: `Unknown monster type '…'`, `No such spawn zone`, `No free spot in that spawn zone`,
+`Crawler limit reached (8)`, `Overlord limit reached (1)`, `Monster limit reached (12)`, `Not enough energy`,
+`The map is still loading`, `The game is over`. The client shows them as-is; it should not depend on the exact
+wording.

@@ -3,7 +3,7 @@ import { fromUtm32, toUtm32 } from './utm.js';
 // The game's WebSocket address comes from the invite link (?server=wss://...) or the join form.
 const DEFAULT_SERVER = new URLSearchParams(location.search).get('server') ?? 'ws://localhost:8090';
 // The message format this page understands; see PROTOCOL.md. Must match the game's MapSocketServer.ProtocolVersion.
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 const HEADING_LENGTH_M = 14;
 const HEARD_ARROW_LENGTH_M = 35;
 const HEARD_ARROW_HEAD_M = 8;
@@ -119,6 +119,7 @@ function main() {
   const error = document.getElementById('join-error');
   const button = document.getElementById('join-button');
 
+  wirePanelToggle();
   serverInput.value = DEFAULT_SERVER;
   nameInput.value = loadName();
   (nameInput.value ? passwordInput : nameInput).focus();
@@ -155,6 +156,19 @@ function main() {
   });
 }
 
+/** "More" / "Less" on the panel: compact keeps only what matters while playing. Compact by default on phones. */
+function wirePanelToggle() {
+  const panel = document.querySelector('.panel');
+  const button = document.getElementById('panel-toggle');
+  const setCompact = (compact) => {
+    panel.classList.toggle('compact', compact);
+    button.textContent = compact ? 'More' : 'Less';
+    button.setAttribute('aria-expanded', String(!compact));
+  };
+  setCompact(window.innerWidth < 600);
+  button.addEventListener('click', () => setCompact(!panel.classList.contains('compact')));
+}
+
 function showJoinScreen(visible) {
   document.getElementById('join').hidden = !visible;
 }
@@ -164,7 +178,6 @@ function showJoinScreen(visible) {
 // ---------------------------------------------------------------------------------------------------------------
 
 let view = null; // { map, area, toLngLat, toLocal, bounds, ready }
-let spawnType = null; // the monster type placed by the next map click, or null when not spawning
 let orderTarget = null; // 'all' or a monster id while the next map click places a moveTo order; null otherwise
 let selectedId = null; // the monster whose individual orders the panel shows, or null
 let latestMonsters = []; // monsters and group order from the last state, for the orders panel
@@ -264,7 +277,7 @@ function showArea(area) {
     addPlayerLayers(map);
     wireHover(map);
     wireControls(map);
-    wireSpawning(map);
+    wireMapClicks(map);
     wireOrders(map);
     frameArea(map, view.bounds);
     resolve();
@@ -288,6 +301,7 @@ function clearLiveLayers() {
   document.getElementById('zones').innerHTML = '';
   updateMonsterCounts([]);
   updateVictory(null);
+  closeSpawnPopup();
   latestMonsters = [];
   latestGroupOrder = null;
   for (const pin of orderPins.values()) pin.marker.remove();
@@ -295,27 +309,28 @@ function clearLiveLayers() {
   selectMonster(null);
 }
 
-/** What the next map click does: place a monster (`spawn` type), place a moveTo order (`order` target), or neither. */
-function setClickMode({ spawn = null, order = null } = {}) {
-  const map = view.map;
-  const spawnButton = [...document.querySelectorAll('.spawn-btn')].find((b) => b.dataset.type === spawn);
-  spawnType = spawnButton && !spawnButton.disabled ? spawn : null;
-  orderTarget = spawnType ? null : order;
-  for (const b of document.querySelectorAll('.spawn-btn')) b.classList.toggle('active', b.dataset.type === spawnType);
+/**
+ * The one click mode: the next map click places a moveTo order for `order` ('all' or a monster id). Otherwise a
+ * click selects a monster or opens a spawn zone's popup.
+ */
+function setClickMode({ order = null } = {}) {
+  orderTarget = order;
   for (const b of document.querySelectorAll('.order-btn[data-kind="moveTo"]')) {
     b.classList.toggle('active', orderTarget !== null && (b.dataset.target === 'all') === (orderTarget === 'all'));
   }
   // CSS crosshair that hover can't override
-  map.getContainer().classList.toggle('spawning', spawnType !== null || orderTarget !== null);
-  map.setPaintProperty('spawn-zone-fill', 'fill-opacity', spawnType ? 0.3 : 0.1); // show where clicks can land
+  view.map.getContainer().classList.toggle('placing', orderTarget !== null);
   updateOrderPanel();
 }
 
-function wireSpawning(map) {
-  for (const b of document.querySelectorAll('.spawn-btn')) {
-    b.addEventListener('click', () => setClickMode({ spawn: spawnType === b.dataset.type ? null : b.dataset.type }));
-  }
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setClickMode(); });
+function wireMapClicks(map) {
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    setClickMode();
+    closeSpawnPopup();
+  });
+  map.on('mouseenter', 'spawn-zone-fill', () => { if (orderTarget === null) map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'spawn-zone-fill', () => { map.getCanvas().style.cursor = ''; });
 
   document.getElementById('recenter').addEventListener('click', () => frameArea(map, view.bounds));
 
@@ -329,16 +344,123 @@ function wireSpawning(map) {
       `<b>Game</b> x ${local.x.toFixed(1)}, z ${local.z.toFixed(1)}${inside ? '' : ' <span class="warn">(outside play area)</span>'}<br>` +
       `<b>GPS</b> ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 
-    // The game decides whether the spawn or order is allowed; the page only asks.
-    if (spawnType) {
-      sendToGame({ t: 'spawn', type: spawnType, x: local.x, z: local.z });
-    } else if (orderTarget !== null) {
+    // The game decides whether an order is allowed; the page only asks.
+    if (orderTarget !== null) {
       sendOrder(orderTarget, 'moveTo', local);
       setClickMode();
-    } else {
-      selectMonster(monsterAt(map, e.point)?.properties.id ?? null);
+      return;
     }
+    // Monsters first, so one standing in a spawn zone can still be picked.
+    const monster = monsterAt(map, e.point);
+    selectMonster(monster?.properties.id ?? null);
+    const zone = monster ? null : spawnZoneAt(map, e.point);
+    if (zone) openSpawnPopup(map, zone);
+    else closeSpawnPopup();
   });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Spawning: pick a spawn zone, then a monster type in its popup; the game picks the spot (PROTOCOL.md, "Spawning")
+// ---------------------------------------------------------------------------------------------------------------
+
+const SPAWN_TYPE_INFO = { overlord: 'Flies, sees 60 m all around, directs crawlers within 100 m to the player.' };
+let spawnTypes = []; // monster types in the order the game listed them
+let spawnZones = []; // from welcome.spawnZones
+let monsterCounts = {}; // alive per type, from the latest state
+let latestEnergy = null;
+let spawnPopup = null; // { popup, zone, buttons: Map(type -> { button, small }) } while a zone's popup is open
+
+function spawnZoneAt(map, point) {
+  const f = map.queryRenderedFeatures(point, { layers: ['spawn-zone-fill'] })[0];
+  return f ? spawnZones.find((z) => z.id === f.properties.id) ?? null : null;
+}
+
+function highlightSpawnZone(id) {
+  view?.map.setPaintProperty('spawn-zone-fill', 'fill-opacity', ['case', ['==', ['get', 'id'], id ?? -1], 0.3, 0.12]);
+}
+
+/** A popup on the zone with one button per monster type; each press asks the game for one monster there. */
+function openSpawnPopup(map, zone) {
+  closeSpawnPopup();
+  const el = document.createElement('div');
+  el.className = 'spawn-pop';
+  const title = document.createElement('div');
+  const name = document.createElement('b');
+  name.textContent = zone.name ?? `Spawn zone ${zone.id}`; // from the game: textContent, not HTML
+  const kind = document.createElement('span');
+  kind.className = 'dim';
+  kind.textContent = ' spawn zone';
+  title.append(name, kind);
+
+  const grid = document.createElement('div');
+  grid.className = 'spawn-buttons';
+  const buttons = new Map();
+  for (const type of spawnTypes) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'spawn-btn';
+    button.dataset.type = type;
+    if (SPAWN_TYPE_INFO[type]) button.title = SPAWN_TYPE_INFO[type];
+    const small = document.createElement('small');
+    button.append(capitalise(type), small);
+    button.addEventListener('click', () => sendToGame({ t: 'spawn', type, zone: zone.id }));
+    grid.append(button);
+    buttons.set(type, { button, small });
+  }
+  const note = document.createElement('div');
+  note.className = 'dim';
+  note.textContent = 'Each one appears at a random spot inside the zone.';
+  const result = document.createElement('div');
+  result.className = 'spawn-result';
+  el.append(title, grid, note, result);
+
+  // Hang the popup off the zone's inner corner, opening towards the middle of the map, so the zone itself stays
+  // visible and the new monsters can be seen arriving.
+  const east = zone.x <= 0 ? 1 : -1, north = zone.z <= 0 ? 1 : -1, h = zone.size / 2;
+  const anchor = `${north > 0 ? 'bottom' : 'top'}-${east > 0 ? 'left' : 'right'}`;
+  const popup = new maplibregl.Popup({ closeButton: true, closeOnClick: false, maxWidth: '260px', anchor, offset: 6 })
+    .setLngLat(view.toLngLat(zone.x + east * h, zone.z + north * h)).setDOMContent(el).addTo(map);
+  popup.on('close', () => {
+    if (spawnPopup?.popup !== popup) return;
+    spawnPopup = null;
+    highlightSpawnZone(null);
+  });
+  spawnPopup = { popup, zone, buttons, result };
+  highlightSpawnZone(zone.id);
+  refreshSpawnPopup();
+}
+
+function closeSpawnPopup() {
+  spawnPopup?.popup.remove(); // its close handler clears the state
+}
+
+function showSpawnResultInPopup(text, ok) {
+  if (!spawnPopup) return;
+  spawnPopup.result.textContent = text;
+  spawnPopup.result.dataset.ok = ok;
+}
+
+/** Keeps the open popup's costs, counts and dimming current. The game still decides; dimmed buttons still ask. */
+function refreshSpawnPopup() {
+  if (!spawnPopup) return;
+  for (const [type, { button, small }] of spawnPopup.buttons) {
+    const cost = monsterCosts[type], limit = monsterLimits[type], n = monsterCounts[type] ?? 0;
+    small.textContent = `cost ${cost ?? '?'}${limit === undefined ? '' : ` · ${n}/${limit}`}`;
+    button.classList.toggle('full', limit !== undefined && n >= limit);
+    button.classList.toggle('short', latestEnergy !== null && cost !== undefined && latestEnergy < cost);
+    button.disabled = !online;
+  }
+}
+
+function spawnZoneFeatures(zones, toLngLat) {
+  return {
+    type: 'FeatureCollection',
+    features: zones.map((z) => ({
+      type: 'Feature',
+      properties: { id: z.id },
+      geometry: { type: 'Polygon', coordinates: [squareRing(z, toLngLat)] },
+    })),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -372,7 +494,7 @@ function selectMonster(id) {
   selectedId = id;
   if (orderTarget !== null && orderTarget !== 'all') orderTarget = null; // a pending "Move to…" was for the old one
   if (view?.map.getLayer('monster-selected')) view.map.setFilter('monster-selected', ['==', ['get', 'id'], id ?? -1]);
-  if (view) setClickMode({ spawn: spawnType, order: orderTarget });
+  if (view) setClickMode({ order: orderTarget });
   else updateOrderPanel();
 }
 
@@ -517,11 +639,11 @@ function addZoneLayers(map) {
     },
   }, 'buildings-fill');
 
-  // Where monsters may be spawned (welcome.spawnZone). Fill strengthens while a spawn button is active.
+  // Where monsters are spawned (welcome.spawnZones). The fill strengthens while that zone's popup is open.
   map.addSource('spawn-zone', { type: 'geojson', data: EMPTY });
   map.addLayer({
     id: 'spawn-zone-fill', type: 'fill', source: 'spawn-zone',
-    paint: { 'fill-color': SPAWN_ZONE_COLOR, 'fill-opacity': 0.1 },
+    paint: { 'fill-color': SPAWN_ZONE_COLOR, 'fill-opacity': 0.12 },
   }, 'buildings-fill');
   map.addLayer({
     id: 'spawn-zone-outline', type: 'line', source: 'spawn-zone',
@@ -551,14 +673,6 @@ function zoneFeatures(defs, states, toLngLat) {
         geometry: { type: 'Polygon', coordinates: [squareRing(z, toLngLat)] },
       };
     }),
-  };
-}
-
-function spawnZoneFeatures(zone, toLngLat) {
-  if (!zone) return EMPTY;
-  return {
-    type: 'FeatureCollection',
-    features: [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [squareRing(zone, toLngLat)] } }],
   };
 }
 
@@ -968,16 +1082,15 @@ function drawSupplyPlanes(map, toLngLat) {
 const monsterCosts = {};
 const monsterLimits = {};
 
-/** "3/8" on each spawn button: monsters of that type in the latest state, out of the game's limit. */
+/** "Crawlers 3/8 · Overlords 1/1" in the panel and the open spawn popup: alive per type out of the game's limit. */
 function updateMonsterCounts(monsters) {
-  const counts = {};
-  for (const m of monsters) counts[m.type] = (counts[m.type] ?? 0) + 1;
-  for (const b of document.querySelectorAll('.spawn-btn')) {
-    const limit = monsterLimits[b.dataset.type];
-    const n = counts[b.dataset.type] ?? 0;
-    b.querySelector('[data-count]').textContent = limit === undefined ? '' : ` · ${n}/${limit}`;
-    b.classList.toggle('full', limit !== undefined && n >= limit);
-  }
+  monsterCounts = {};
+  for (const m of monsters) monsterCounts[m.type] = (monsterCounts[m.type] ?? 0) + 1;
+  document.getElementById('army').textContent = spawnTypes.map((type) => {
+    const limit = monsterLimits[type];
+    return `${capitalise(type)}s ${monsterCounts[type] ?? 0}${limit === undefined ? '' : `/${limit}`}`;
+  }).join(' · ');
+  refreshSpawnPopup();
 }
 
 let toastTimer = 0;
@@ -996,9 +1109,7 @@ function updateEnergy(msg) {
   fill.style.width = `${(100 * msg.energy) / msg.maxEnergy}%`;
   const rate = msg.energyRate !== undefined ? ` · +${msg.energyRate.toFixed(2)}/s` : '';
   document.getElementById('energy-text').textContent = `${msg.energy.toFixed(1)} / ${msg.maxEnergy}${rate}`;
-  for (const b of document.querySelectorAll('.spawn-btn')) {
-    b.classList.toggle('short', msg.energy < (monsterCosts[b.dataset.type] ?? Infinity));
-  }
+  latestEnergy = msg.energy;
 }
 
 function addPlayerLayers(map) {
@@ -1060,8 +1171,8 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     status.textContent = text;
     status.dataset.state = state;
     online = state === 'connected' || state === 'warning';
-    for (const b of document.querySelectorAll('.spawn-btn')) b.disabled = !online;
     updateOrderPanel();
+    refreshSpawnPopup();
   };
 
   // Back to the join screen, leaving the status line in a sensible state behind it.
@@ -1090,17 +1201,19 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     callRange = msg.callRange ?? callRange;
     for (const key of Object.keys(monsterLimits)) delete monsterLimits[key]; // a restarted game may drop limits
     orderTypes.clear();
+    spawnTypes = [];
     for (const { type, cost, limit, orders } of msg.monsterTypes ?? []) {
       monsterCosts[type] = cost;
       if (limit !== undefined) monsterLimits[type] = limit;
       if (orders === true) orderTypes.add(type);
-      const label = document.querySelector(`.spawn-btn[data-type="${CSS.escape(type)}"] [data-cost]`);
-      if (label) label.textContent = cost;
+      spawnTypes.push(type);
     }
+    closeSpawnPopup();
+    spawnZones = msg.spawnZones ?? [];
     updateMonsterCounts([]);
     document.getElementById('order-who').textContent = [...orderTypes].map((t) => `${t}s`).join(' & ');
     view.map.getSource('zones').setData(zoneFeatures(zoneDefs, [], view.toLngLat));
-    view.map.getSource('spawn-zone').setData(spawnZoneFeatures(msg.spawnZone, view.toLngLat));
+    view.map.getSource('spawn-zone').setData(spawnZoneFeatures(spawnZones, view.toLngLat));
     updateZonePanel(zoneDefs, []);
     ready = true;
     setStatus(`Connected to game${name ? ` as ${name}` : ''}`, 'connected');
@@ -1213,8 +1326,10 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         const respawn = msg.respawnIn ? ` Back in ${Math.round(msg.respawnIn)} s.` : '';
         showToast(`${msg.byType ? `Your ${msg.byType} #${msg.by} killed the player!` : 'The player died!'}${respawn}`, true);
       } else if (msg.t === 'spawnResult') {
-        const type = msg.type ? msg.type[0].toUpperCase() + msg.type.slice(1) : 'Monster';
-        showToast(msg.ok ? `${type} spawned` : `Can't spawn: ${msg.reason}`, msg.ok);
+        const type = msg.type ? capitalise(msg.type) : 'Monster';
+        const text = msg.ok ? `${type} spawned` : `Can't spawn: ${msg.reason}`;
+        showToast(text, msg.ok);
+        showSpawnResultInPopup(text, msg.ok);
       }
     };
 
@@ -1311,7 +1426,8 @@ function wireZoneHover(map) {
   map.on('mouseleave', 'zone-fill', hide);
   map.on('click', (e) => {
     const hit = map.queryRenderedFeatures(e.point, { layers: ['zone-fill'] });
-    if (hit.length && !spawnType && orderTarget === null && !monsterAt(map, e.point)) show({ ...e, features: hit });
+    const free = orderTarget === null && !monsterAt(map, e.point) && !spawnZoneAt(map, e.point);
+    if (hit.length && free) show({ ...e, features: hit });
     else if (!hit.length) hide();
   });
   refreshZonePopup = (zones) => {

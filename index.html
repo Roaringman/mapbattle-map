@@ -89,7 +89,10 @@
     .zone[data-player-held="true"] .zone-label { color: #ff8a80; }
     .zone[data-status="contested"] .zone-label { color: #ffb347; }
     .zone[data-status="reclaiming"] .zone-label { color: #ff5a4f; }
-    #map.placing .maplibregl-canvas { cursor: crosshair !important; }
+    #map.placing .maplibregl-canvas, #map.boxing .maplibregl-canvas { cursor: crosshair !important; }
+    .select-box { position: absolute; z-index: 1; pointer-events: none; box-sizing: border-box;
+      border: 1.5px dashed var(--accent); background: rgba(224, 184, 79, 0.12); border-radius: 2px; }
+    .select-box[hidden] { display: none; }
     .order-box { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2c343d; }
     .order-box[hidden], #selected[hidden] { display: none; }
     .order-title { font-weight: 600; margin-bottom: 6px; }

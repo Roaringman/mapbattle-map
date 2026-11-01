@@ -178,8 +178,9 @@ function showJoinScreen(visible) {
 // ---------------------------------------------------------------------------------------------------------------
 
 let view = null; // { map, area, toLngLat, toLocal, bounds, ready }
-let orderTarget = null; // 'all' or a monster id while the next map click places a moveTo order; null otherwise
-let selectedId = null; // the monster whose individual orders the panel shows, or null
+// While the next map click places a moveTo order: 'all' (group order) or a list of monster ids (the selection).
+let orderTarget = null;
+let selectedIds = []; // monsters the selection panel acts on: one tapped, or several caught in a selection box
 let latestMonsters = []; // monsters and group order from the last state, for the orders panel
 let latestGroupOrder = null;
 const orderTypes = new Set(); // monster types that obey orders (welcome.monsterTypes[].orders)
@@ -306,7 +307,7 @@ function clearLiveLayers() {
   latestGroupOrder = null;
   for (const pin of orderPins.values()) pin.marker.remove();
   orderPins.clear();
-  selectMonster(null);
+  selectMonsters([]);
 }
 
 /**
@@ -350,9 +351,14 @@ function wireMapClicks(map) {
       setClickMode();
       return;
     }
-    // Monsters first, so one standing in a spawn zone can still be picked.
+    // Monsters first, so one standing in a spawn zone can still be picked. Shift-click adds to the selection.
     const monster = monsterAt(map, e.point);
-    selectMonster(monster?.properties.id ?? null);
+    const id = monster?.properties.id;
+    if (id !== undefined && e.originalEvent.shiftKey) {
+      selectMonsters(selectedIds.includes(id) ? selectedIds.filter((x) => x !== id) : [...selectedIds, id]);
+    } else {
+      selectMonsters(id === undefined ? [] : [id]);
+    }
     const zone = monster ? null : spawnZoneAt(map, e.point);
     if (zone) openSpawnPopup(map, zone);
     else closeSpawnPopup();
@@ -469,9 +475,11 @@ function spawnZoneFeatures(zones, toLngLat) {
 
 const ORDER_DRAG_SEND_MS = 200; // how often a dragged pin re-sends its moveTo
 const ORDER_PIN_HOLD_MS = 1000; // after a drop, how long the pin ignores state while the game catches up
-const orderPins = new Map(); // 'all' or monster id -> { marker, dragging, holdUntil, lastSent }
+const orderPins = new Map(); // 'all' or the sorted ids sharing a point ("3,4,7") -> { marker, dragging, holdUntil, lastSent }
 
+/** `target` is 'all', an id, or a list of ids; a list of one goes out as a plain id. */
 function sendOrder(target, kind, point) {
+  if (Array.isArray(target) && target.length === 1) target = target[0];
   const msg = { t: 'order', target, kind };
   if (point) Object.assign(msg, { x: Math.round(point.x * 100) / 100, z: Math.round(point.z * 100) / 100 });
   sendToGame(msg);
@@ -490,12 +498,23 @@ function monsterAt(map, point) {
   return best;
 }
 
-function selectMonster(id) {
-  selectedId = id;
-  if (orderTarget !== null && orderTarget !== 'all') orderTarget = null; // a pending "Move to…" was for the old one
-  if (view?.map.getLayer('monster-selected')) view.map.setFilter('monster-selected', ['==', ['get', 'id'], id ?? -1]);
+function highlightSelection() {
+  if (view?.map.getLayer('monster-selected')) {
+    view.map.setFilter('monster-selected', ['in', ['get', 'id'], ['literal', selectedIds]]);
+  }
+}
+
+function selectMonsters(ids) {
+  selectedIds = ids;
+  if (Array.isArray(orderTarget)) orderTarget = null; // a pending "Move to…" was for the old selection
+  highlightSelection();
   if (view) setClickMode({ order: orderTarget });
   else updateOrderPanel();
+}
+
+/** The selected monsters that take individual orders (the game's welcome.monsterTypes[].orders). */
+function orderableSelection() {
+  return latestMonsters.filter((m) => selectedIds.includes(m.id) && orderTypes.has(m.type)).map((m) => m.id);
 }
 
 function wireOrders(map) {
@@ -503,16 +522,98 @@ function wireOrders(map) {
   map.on('mouseleave', 'monster-dot', () => { map.getCanvas().style.cursor = ''; });
   for (const b of document.querySelectorAll('.order-btn')) {
     b.addEventListener('click', () => {
-      const target = b.dataset.target === 'all' ? 'all' : selectedId;
-      if (target === null) return;
+      const all = b.dataset.target === 'all';
+      const target = all ? 'all' : orderableSelection();
+      if (!all && target.length === 0) return;
       if (b.dataset.kind === 'moveTo') {
-        setClickMode({ order: orderTarget === target ? null : target });
+        const alreadyPlacing = all ? orderTarget === 'all' : Array.isArray(orderTarget);
+        setClickMode({ order: alreadyPlacing ? null : target });
       } else {
         setClickMode();
         sendOrder(target, b.dataset.kind);
       }
     });
   }
+  wireBoxSelect(map);
+}
+
+// Box selection: press and hold still for a moment, then drag. A drag that starts straight away still pans the map,
+// on a mouse and on a phone alike. Releasing selects every monster inside and gets ready to place their move-to.
+const BOX_HOLD_MS = 300;
+const BOX_MOVE_TOLERANCE_PX = 6;
+
+function wireBoxSelect(map) {
+  const canvas = map.getCanvas();
+  const container = map.getContainer();
+  const box = document.createElement('div');
+  box.className = 'select-box';
+  box.hidden = true;
+  container.append(box);
+
+  let start = null; // where the press began, while it may still become a box
+  let boxing = false;
+  let timer = 0;
+  const pointOf = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+  const draw = (a, b) => {
+    Object.assign(box.style, {
+      left: `${Math.min(a.x, b.x)}px`, top: `${Math.min(a.y, b.y)}px`,
+      width: `${Math.abs(a.x - b.x)}px`, height: `${Math.abs(a.y - b.y)}px`,
+    });
+  };
+  const stop = () => {
+    clearTimeout(timer);
+    start = null;
+    if (!boxing) return;
+    boxing = false;
+    box.hidden = true;
+    container.classList.remove('boxing');
+    map.dragPan.enable();
+  };
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!e.isPrimary) return stop(); // a second finger: pinch-zoom, not a box
+    if (e.button !== 0 || orderTarget !== null) return;
+    start = pointOf(e);
+    const touch = e.pointerType === 'touch';
+    timer = setTimeout(() => {
+      boxing = true;
+      map.dragPan.disable(); // the press didn't move, so nothing was panning yet
+      container.classList.add('boxing');
+      draw(start, start);
+      box.hidden = false;
+      if (touch) navigator.vibrate?.(15); // on phones, a tick to say the box has started
+    }, BOX_HOLD_MS);
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (!start || !e.isPrimary) return;
+    const p = pointOf(e);
+    if (boxing) draw(start, p);
+    else if (Math.hypot(p.x - start.x, p.y - start.y) > BOX_MOVE_TOLERANCE_PX) stop(); // a pan, not a hold
+  });
+  window.addEventListener('pointerup', (e) => {
+    if (boxing && start && e.isPrimary) {
+      const p = pointOf(e);
+      // A hold released without dragging is just a click, which the map's click handler takes care of.
+      if (Math.abs(p.x - start.x) > BOX_MOVE_TOLERANCE_PX || Math.abs(p.y - start.y) > BOX_MOVE_TOLERANCE_PX) {
+        selectInBox(map, start, p);
+      }
+    }
+    stop();
+  });
+  window.addEventListener('pointercancel', stop);
+}
+
+function selectInBox(map, a, b) {
+  const hits = map.queryRenderedFeatures(
+    [[Math.min(a.x, b.x), Math.min(a.y, b.y)], [Math.max(a.x, b.x), Math.max(a.y, b.y)]], { layers: ['monster-dot'] });
+  selectMonsters([...new Set(hits.map((f) => f.properties.id))]);
+  closeSpawnPopup();
+  // Straight on to "where should they go?": the next tap on the map sends them there.
+  const orderable = orderableSelection();
+  if (orderable.length) setClickMode({ order: orderable });
 }
 
 function capitalise(text) {
@@ -531,30 +632,49 @@ function updateOrderPanel() {
   box.hidden = orderTypes.size === 0;
   for (const b of box.querySelectorAll('.order-btn[data-target="all"]')) b.disabled = !online;
 
-  const selected = latestMonsters.find((m) => m.id === selectedId);
+  const selected = latestMonsters.filter((m) => selectedIds.includes(m.id));
   const g = latestGroupOrder;
+  const who = selected.length === 1 ? `#${selected[0].id}` : `the ${orderTarget?.length ?? selected.length} selected`;
   document.getElementById('order-status').textContent =
     orderTarget === 'all' ? 'Click the map where they should go. Esc to cancel.'
-    : orderTarget !== null ? `Click the map where #${selectedId} should go. Esc to cancel.`
-    : !g ? 'No group order: monsters act on their own. Tap a monster for its own orders.'
+    : orderTarget !== null ? `Click the map where ${who} should go. Esc to cancel.`
+    : !g ? 'No group order: monsters act on their own. Tap a monster, or hold and drag to box-select several.'
     : g.kind === 'stay' ? 'Group order: stay where they are.'
     : 'Group order: move to the flag. Drag it to redirect them.';
 
   const panel = document.getElementById('selected');
-  panel.hidden = !selected;
-  if (!selected) return;
-  const obeys = orderTypes.has(selected.type);
-  document.getElementById('selected-name').textContent = `${capitalise(selected.type)} #${selected.id}`;
-  document.getElementById('selected-order').textContent = obeys ? orderText(selected.order) : "doesn't take orders";
-  for (const b of panel.querySelectorAll('.order-btn')) b.disabled = !online || !obeys;
+  panel.hidden = selected.length === 0;
+  if (!selected.length) return;
+  const orderable = orderableSelection();
+  const name = document.getElementById('selected-name');
+  const detail = document.getElementById('selected-order');
+  if (selected.length === 1) {
+    const [m] = selected;
+    name.textContent = `${capitalise(m.type)} #${m.id}`;
+    detail.textContent = orderable.length ? orderText(m.order) : "doesn't take orders";
+  } else {
+    const counts = {};
+    for (const m of selected) counts[m.type] = (counts[m.type] ?? 0) + 1;
+    name.textContent = `${selected.length} selected`;
+    const skipped = selected.length - orderable.length;
+    detail.textContent = Object.entries(counts).map(([t, n]) => `${n} ${t}${n === 1 ? '' : 's'}`).join(', ') +
+      (skipped ? ` (${skipped} won't take orders)` : '');
+  }
+  for (const b of panel.querySelectorAll('.order-btn')) b.disabled = !online || orderable.length === 0;
 }
 
-/** A draggable pin for a moveTo point; dragging re-sends the order, the game's reply moves it via state. */
-function createOrderPin(target, point) {
+/**
+ * A draggable pin for a moveTo point; dragging re-sends the order, the game's reply moves it via state. `target` is
+ * 'all', one id, or the ids that share the point (a selection order).
+ */
+function createOrderPin(key, target, point) {
   const el = document.createElement('div');
+  const several = Array.isArray(target);
   el.className = target === 'all' ? 'order-pin' : 'order-pin individual';
-  el.textContent = target === 'all' ? 'ALL' : `#${target}`;
-  el.title = target === 'all' ? 'Group move-to point: drag to redirect' : `Move-to point for #${target}: drag to redirect`;
+  el.textContent = target === 'all' ? 'ALL' : several ? `×${target.length}` : `#${target}`;
+  el.title = target === 'all' ? 'Group move-to point: drag to redirect'
+    : several ? `Move-to point for ${target.map((id) => `#${id}`).join(', ')}: drag to redirect`
+    : `Move-to point for #${target}: drag to redirect`;
   el.addEventListener('click', (e) => e.stopPropagation()); // a tap on the pin isn't a map click
 
   // The tip under the pin marks the point, so a monster standing on it stays visible and tappable.
@@ -573,26 +693,39 @@ function createOrderPin(target, point) {
     pin.holdUntil = performance.now() + ORDER_PIN_HOLD_MS;
     send();
   });
-  orderPins.set(target, pin);
+  orderPins.set(key, pin);
   return pin;
 }
 
-/** Pins for the group moveTo and each individual moveTo, placed where the game says; removed when the order ends. */
+/**
+ * Pins for the group moveTo and the individual ones, placed where the game says and removed when the order ends.
+ * Monsters sent to the same point (a selection order) share one pin, so a box of eight shows one pin, not eight.
+ */
 function updateOrderPins(groupOrder, monsters) {
-  const wanted = new Map();
-  if (groupOrder?.kind === 'moveTo') wanted.set('all', groupOrder);
-  for (const m of monsters) if (m.order?.kind === 'moveTo' && m.order.from === 'individual') wanted.set(m.id, m.order);
+  const wanted = new Map(); // key -> { target, point }
+  if (groupOrder?.kind === 'moveTo') wanted.set('all', { target: 'all', point: groupOrder });
+  const byPoint = new Map();
+  for (const m of monsters) {
+    if (m.order?.kind !== 'moveTo' || m.order.from !== 'individual') continue;
+    const at = `${m.order.x},${m.order.z}`;
+    if (!byPoint.has(at)) byPoint.set(at, { ids: [], point: m.order });
+    byPoint.get(at).ids.push(m.id);
+  }
+  for (const { ids, point } of byPoint.values()) {
+    ids.sort((a, b) => a - b);
+    wanted.set(ids.join(','), { target: ids.length === 1 ? ids[0] : ids, point });
+  }
 
-  for (const [target, pin] of orderPins) {
-    if (!wanted.has(target) && !pin.dragging) {
+  for (const [key, pin] of orderPins) {
+    if (!wanted.has(key) && !pin.dragging) {
       pin.marker.remove();
-      orderPins.delete(target);
+      orderPins.delete(key);
     }
   }
   const now = performance.now();
-  for (const [target, point] of wanted) {
-    const pin = orderPins.get(target);
-    if (!pin) createOrderPin(target, point);
+  for (const [key, { target, point }] of wanted) {
+    const pin = orderPins.get(key);
+    if (!pin) createOrderPin(key, target, point);
     else if (!pin.dragging && now > pin.holdUntil) pin.marker.setLngLat(view.toLngLat(point.x, point.z));
   }
 }
@@ -1244,8 +1377,13 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     latestMonsters = monsters;
     latestGroupOrder = msg.groupOrder ?? null;
     updateOrderPins(latestGroupOrder, monsters);
-    if (selectedId !== null && !monsters.some((m) => m.id === selectedId)) selectMonster(null); // it died
-    else updateOrderPanel();
+    // Drop selected monsters that died, without cancelling a pending "Move to…" for the rest.
+    const alive = selectedIds.filter((id) => monsters.some((m) => m.id === id));
+    if (alive.length !== selectedIds.length) {
+      selectedIds = alive;
+      highlightSelection();
+    }
+    updateOrderPanel();
     lastMonsterPositions.clear();
     for (const m of monsters) lastMonsterPositions.set(m.id, { x: m.x, z: m.z });
     const zones = zoneFeatures(zoneDefs, msg.zones, toLngLat);

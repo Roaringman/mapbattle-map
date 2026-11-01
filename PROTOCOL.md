@@ -296,11 +296,12 @@ The map player can tell monsters where to go and when to hold still. Only monste
 { "t": "order", "target": 3, "kind": "moveTo", "x": 12, "z": -40 }
 { "t": "order", "target": 3, "kind": "stay" }
 { "t": "order", "target": 3, "kind": "release" }
+{ "t": "order", "target": [3, 4, 7], "kind": "moveTo", "x": 12, "z": -40 }
 ```
 
 | Field | Notes |
 |---|---|
-| `target` | `"all"` for a **group order** (every obeying monster without an individual order), or a monster `id` for an **individual order**. |
+| `target` | `"all"` for a **group order** (every obeying monster without an individual order), a monster `id` for an **individual order**, or a list of ids for a **selection order** (the map player box-selected several monsters). |
 | `kind` | `moveTo` (needs `x`, `z`), `stay`, or `release` (cancel). |
 | `x`, `z` | Local metres, `moveTo` only. |
 
@@ -329,7 +330,12 @@ The map player can tell monsters where to go and when to hold still. Only monste
 8. **Several map players** share the monsters: any map player's order applies, the last one wins, and every page
    shows the result through `state`.
 9. **Limits.** Accept at least 10 orders a second per connection; refuse beyond that with `Too many orders`.
-   Orders end when the monster dies.
+   A selection order counts as one. Orders end when the monster dies.
+10. **Selection orders** (`target` is a list of ids) are the same individual order given to each listed monster in
+    one message: each gets its own individual order (`monsters[].order.from` is `individual`), with the same point
+    for `moveTo`. Like group members, they gather around the point, spread a few metres apart, rather than stacking.
+    Ids that don't exist or whose type doesn't take individual orders are skipped; the order is refused only if
+    none of them can take it. Dragging the shared point re-sends the order to the same list.
 
 Order refusal reasons: `No such monster`, `That monster doesn't take orders`, `Outside the play area`,
 `No reachable ground near that point`, `Too many orders`, `Unknown order '…'`, `The game is over`. The client shows

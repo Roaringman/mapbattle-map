@@ -37,7 +37,9 @@ Libraries: MapLibre GL JS 4.7.1 from unpkg, pinned. No npm, no bundler; keep it 
    and a map click only ever means "place this order", "select this monster" or "open this spawn zone".
 5. Orders (`order` message): the page only asks. Pins, rings and lines come from `state.groupOrder` and
    `monsters[].order`; a dragged pin is the one thing drawn from local input, and only until the game catches up.
-   Which types obey comes from `welcome.monsterTypes[].orders`, never from a list in the page.
+   Which types obey comes from `welcome.monsterTypes[].orders`, never from a list in the page. Press, hold still
+   ~0.3 s, then drag draws a selection box (a drag that starts straight away still pans); the selection gets one
+   order with `target` as a list of ids, and monsters sharing a move-to point share one pin.
 6. If the connection drops after joining, reconnect with the same password. "Wrong password." on a reconnect means the
    host restarted: back to the join screen with that explanation.
 

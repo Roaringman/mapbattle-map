@@ -282,6 +282,7 @@ function clearLiveLayers() {
   for (const source of LIVE_SOURCES) view.map.getSource(source).setData(EMPTY);
   document.getElementById('zones').innerHTML = '';
   updateMonsterCounts([]);
+  updateVictory(null);
   latestMonsters = [];
   latestGroupOrder = null;
   for (const pin of orderPins.values()) pin.marker.remove();
@@ -761,6 +762,36 @@ function coneFeatures(monsters, toLngLat) {
   };
 }
 
+const WINNER_TEXT = { monsters: 'Monsters win!', player: 'The player wins', draw: 'Draw' };
+
+function formatSeconds(s) {
+  const total = Math.ceil(s);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+/** Victory points from state.victory: a bar per side, the game's rates as "wins in m:ss", or the winner. */
+function updateVictory(v) {
+  const box = document.getElementById('victory');
+  box.hidden = !v;
+  if (!v) return;
+  for (const side of ['monsters', 'player']) {
+    const row = box.querySelector(`.vp[data-side="${side}"]`);
+    row.querySelector('.vp-bar span').style.width = `${Math.min(100, (100 * v[side]) / v.target)}%`;
+    row.querySelector('.vp-num').textContent = `${Math.floor(v[side])} / ${v.target}`;
+  }
+  const note = document.getElementById('victory-note');
+  if (v.winner) {
+    note.textContent = WINNER_TEXT[v.winner] ?? 'Game over';
+    note.dataset.winner = v.winner;
+    return;
+  }
+  delete note.dataset.winner;
+  const eta = (label, side, rate) => (rate > 0 ? `${label} in ${formatSeconds((v.target - v[side]) / rate)}` : '');
+  const parts = [eta('monsters win', 'monsters', v.monstersRate), eta('player wins', 'player', v.playerRate)]
+    .filter(Boolean);
+  note.textContent = parts.length ? `At this pace: ${parts.join(' · ')}` : `First to ${v.target}. Hold zones to score.`;
+}
+
 /** performance.now() seconds when the player is back after a playerKilled event; 0 when not dead. */
 let playerRespawnAt = 0;
 
@@ -1086,6 +1117,7 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     updateEnergy(msg);
     updateMonsterCounts(monsters);
     updateSighting(msg);
+    updateVictory(msg.victory);
     drawKills(map, toLngLat);
     drawSupplyPlanes(map, toLngLat);
   };
@@ -1135,6 +1167,8 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         recentKills.push({ kind: 'monster', x: msg.x, z: msg.z, at: performance.now() / 1000, seconds: KILL_MARKER_SECONDS });
         drawKills(view.map, view.toLngLat);
         showToast(`Your ${msg.type} #${msg.id} was killed`, false);
+      } else if (msg.t === 'gameOver') {
+        showToast(`${WINNER_TEXT[msg.winner] ?? 'Game over'} (${Math.floor(msg.monsters)} – ${Math.floor(msg.player)})`, msg.winner === 'monsters');
       } else if (msg.t === 'orderResult') {
         if (!msg.ok) showToast(`Order refused: ${msg.reason}`, false);
       } else if (msg.t === 'supplyPlane') {

@@ -126,7 +126,8 @@ must ignore `state` and events until it has finished handling `welcome`.
   "lastSeen": { "x": 1.2, "z": 3.4, "yaw": 90, "ago": 12.5 },
   "deaths": 1, "energy": 2.4, "energyRate": 0.5, "maxEnergy": 5,
   "monsters": [ … ],
-  "zones": [ { "id": 1, "progress": 0.4, "held": false, "status": "capturing", "monsters": 2 } ]
+  "zones": [ { "id": 1, "progress": 0.4, "held": false, "playerProgress": 0, "playerHeld": false,
+               "status": "capturing", "monsters": 2 } ]
 }
 ```
 
@@ -140,10 +141,19 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `monsters` | All of the map player's monsters, see below. |
 | `zones[].progress` | 0 = neutral, 1 = fully monster-held. |
 | `zones[].held` | Held by the monsters (stays true until drained back to 0). |
+| `zones[].playerProgress` | Optional. 0 = neutral, 1 = fully held by the FPS player. At most one of `progress` and `playerProgress` is above 0. |
+| `zones[].playerHeld` | Optional. Held by the FPS player (stays true until monsters drain it back to 0). |
 | `zones[].status` | `idle`, `capturing` (monsters inside), `reclaiming` (FPS player alone inside), `contested` (both inside). |
 | `zones[].monsters` | Zone-capturing monsters inside. |
 
-`reclaiming` and `contested` reveal that the FPS player is in that zone. That is deliberate.
+A zone is one tug of war: think of it as a single value from −1 (player-held) to +1 (monster-held), sent as
+`progress` = max(0, value) and `playerProgress` = max(0, −value). Whoever is alone inside first drains the other
+side's hold, then builds their own. The player alone takes 10 s per half (monster-held → neutral → player-held).
+Each zone the player holds earns them supply points for ammo drops (see `supplyPlane`); the points themselves are
+never sent.
+
+`reclaiming` and `contested` reveal that the FPS player is in that zone. `playerHeld` reveals that they have been
+there. That is deliberate.
 
 #### `monsters[]`
 
@@ -169,7 +179,26 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `killed` | `id`, `type`, `x`, `z` | One of the map player's monsters died there. |
 | `playerKilled` | `by`, `byType`, `x`, `z`, `respawnIn`, `deaths` | The FPS player died. `by`/`byType` is the monster that dealt the last hit and (`x`, `z`) where it saw them fall; all four are absent if no monster gets the credit. The player is out of the game (nothing can see them) for `respawnIn` seconds, then respawns at the start point. `deaths` is the new total. |
 | `yell` | `id`, `from`, `wave`, `x`, `z`, `range` | Monster `id` yelled at (`x`, `z`), heard within `range` m. `from` is the monster it was answering, or -1 if it started the alarm. Yells in one alarm share a `wave`. |
+| `supplyPlane` | `x1`, `z1`, `x2`, `z2`, `show` | A supply plane flew straight from (`x1`, `z1`) to (`x2`, `z2`) and has left the map. See below. |
 | `pong` | | Reply to `ping`. |
+
+#### `supplyPlane`
+
+```json
+{ "t": "supplyPlane", "x1": 290.43, "z1": 360, "x2": -291.87, "z2": -360, "show": 30 }
+```
+
+The FPS player spent supply points on an ammo drop. A plane flew a straight line across the whole map, from beyond
+one edge to beyond the other (the endpoints are outside the play area; clip or let MapLibre draw past the edge),
+and dropped a crate on a parachute **somewhere below that line**. The message arrives once the plane has left,
+usually a few seconds before the crate lands.
+
+- **Draw it as a trace of the route**: a line (e.g. dashed) that fades out over `show` seconds, then remove it.
+  Several can be on screen at once.
+- **The crate's position is never sent**, not in this message and not later. The client must not suggest an exact
+  spot; the line is all the map player knows. The drop is always within about 45 m of where the FPS player called
+  it, which is the hint: send monsters to sweep along the line.
+- The FPS player picks the crate up by walking to it; nothing is sent when that happens.
 
 ## 3. After joining: client → game
 

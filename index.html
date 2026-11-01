@@ -30,6 +30,9 @@
     #sighting:empty { display: none; }
     #sighting[data-state="spotted"] { color: #ff5a4f; }
     #sighting[data-state="lost"] { color: #c9c3b8; }
+    #sighting[data-state="dead"] { color: #6cc070; }
+    #deaths { font-size: 12px; color: var(--dim); }
+    #deaths:empty { display: none; }
     #connection { margin-top: 6px; font-size: 12px; color: var(--dim); }
     #connection::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
       margin-right: 6px; background: var(--dim); }
@@ -109,6 +112,7 @@
     <div id="summary" class="dim">Not connected</div>
     <div id="connection" data-state="offline">Not connected</div>
     <div id="sighting" data-state="hidden"></div>
+    <div id="deaths"></div>
     <div class="legend">
       <span style="--c:#c9a27a">House</span>
       <span style="--c:#7d8a96">Outbuilding</span>

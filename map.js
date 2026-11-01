@@ -266,6 +266,7 @@ function updateSummary(area) {
 function clearLiveLayers() {
   recentKills.length = 0;
   activeYells.length = 0;
+  playerRespawnAt = 0;
   if (!view?.map.getSource('player')) return;
   for (const source of LIVE_SOURCES) view.map.getSource(source).setData(EMPTY);
   document.getElementById('zones').innerHTML = '';
@@ -414,12 +415,16 @@ function addMonsterLayers(map) {
     paint: { 'line-color': '#ffd166', 'line-width': 3, 'line-opacity': ['get', 'fade'] },
   });
 
+  // Where monsters died (red ring) and where the player fell (solid red with a white ring).
+  const isPlayer = ['==', ['get', 'kind'], 'player'];
   map.addSource('kills', { type: 'geojson', data: EMPTY });
   map.addLayer({
     id: 'kill-marker', type: 'circle', source: 'kills',
     paint: {
-      'circle-radius': 7, 'circle-color': '#ff5a4f', 'circle-opacity': 0.15,
-      'circle-stroke-color': '#ff5a4f', 'circle-stroke-width': 2, 'circle-stroke-opacity': ['get', 'fade'],
+      'circle-radius': ['case', isPlayer, 10, 7], 'circle-color': '#ff5a4f',
+      'circle-opacity': ['*', ['get', 'fade'], ['case', isPlayer, 0.7, 0.15]],
+      'circle-stroke-color': ['case', isPlayer, '#ffffff', '#ff5a4f'], 'circle-stroke-width': ['case', isPlayer, 2.5, 2],
+      'circle-stroke-opacity': ['get', 'fade'],
     },
   });
 
@@ -517,8 +522,20 @@ function coneFeatures(monsters, toLngLat) {
   };
 }
 
+/** performance.now() seconds when the player is back after a playerKilled event; 0 when not dead. */
+let playerRespawnAt = 0;
+
 function updateSighting(msg) {
   const line = document.getElementById('sighting');
+  if (msg.deaths !== undefined) {
+    document.getElementById('deaths').textContent = `Player killed ${msg.deaths} time${msg.deaths === 1 ? '' : 's'}`;
+  }
+  const respawnIn = playerRespawnAt - performance.now() / 1000;
+  if (respawnIn > 0) {
+    line.textContent = `Player down · respawns in ${Math.ceil(respawnIn)} s`;
+    line.dataset.state = 'dead';
+    return;
+  }
   const counts = {};
   for (const m of msg.monsters ?? []) if (m.sees) counts[m.type] = (counts[m.type] ?? 0) + 1;
   const watchers = Object.entries(counts).map(([type, n]) => `${n} ${type}${n === 1 ? '' : 's'}`).join(' and ');
@@ -601,17 +618,20 @@ function animateYells(map, toLngLat) {
 }
 
 const KILL_MARKER_SECONDS = 10;
-const recentKills = [];
+const PLAYER_DEATH_MARKER_SECONDS = 20;
+const recentKills = []; // { kind: 'monster' | 'player', x, z, at, seconds }
 
-/** Shows where a monster died; markers fade out over KILL_MARKER_SECONDS. */
+/** Shows where monsters died and where the player fell; each marker fades out over its own seconds. */
 function drawKills(map, toLngLat) {
   const now = performance.now() / 1000;
-  while (recentKills.length && now - recentKills[0].at > KILL_MARKER_SECONDS) recentKills.shift();
+  for (let i = recentKills.length - 1; i >= 0; i--) {
+    if (now - recentKills[i].at > recentKills[i].seconds) recentKills.splice(i, 1);
+  }
   map.getSource('kills').setData({
     type: 'FeatureCollection',
     features: recentKills.map((k) => ({
       type: 'Feature',
-      properties: { fade: 1 - (now - k.at) / KILL_MARKER_SECONDS },
+      properties: { kind: k.kind, fade: 1 - (now - k.at) / k.seconds },
       geometry: { type: 'Point', coordinates: toLngLat(k.x, k.z) },
     })),
   });
@@ -827,9 +847,19 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         activeYells.push({ x: msg.x, z: msg.z, range: msg.range, at: performance.now() / 1000, fromX: from?.x, fromZ: from?.z });
         if (wasIdle) animateYells(view.map, view.toLngLat);
       } else if (msg.t === 'killed') {
-        recentKills.push({ x: msg.x, z: msg.z, at: performance.now() / 1000 });
+        recentKills.push({ kind: 'monster', x: msg.x, z: msg.z, at: performance.now() / 1000, seconds: KILL_MARKER_SECONDS });
         drawKills(view.map, view.toLngLat);
         showToast(`Your ${msg.type} #${msg.id} was killed`, false);
+      } else if (msg.t === 'playerKilled') {
+        const now = performance.now() / 1000;
+        playerRespawnAt = now + (msg.respawnIn ?? 0);
+        // No credit means no position either: nothing to mark on the map.
+        if (msg.x !== undefined) {
+          recentKills.push({ kind: 'player', x: msg.x, z: msg.z, at: now, seconds: PLAYER_DEATH_MARKER_SECONDS });
+          drawKills(view.map, view.toLngLat);
+        }
+        const respawn = msg.respawnIn ? ` Back in ${Math.round(msg.respawnIn)} s.` : '';
+        showToast(`${msg.byType ? `Your ${msg.byType} #${msg.by} killed the player!` : 'The player died!'}${respawn}`, true);
       } else if (msg.t === 'spawnResult') {
         const type = msg.type ? msg.type[0].toUpperCase() + msg.type.slice(1) : 'Monster';
         showToast(msg.ok ? `${type} spawned` : `Can't spawn: ${msg.reason}`, msg.ok);

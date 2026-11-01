@@ -25,7 +25,7 @@ const ZONE_PLAYER = '#ff5a4f';
 const SPAWN_ZONE_COLOR = '#6cc070';
 const SUPPLY_PLANE_COLOR = '#7fb8ff';
 const LIVE_SOURCES = ['player', 'last-seen', 'monsters', 'cones', 'heard', 'kills', 'zones', 'spawn-zone', 'network',
-  'yells', 'commands', 'supply-planes'];
+  'yells', 'commands', 'supply-planes', 'order-lines'];
 
 function categoryOf(type) {
   for (const [name, types] of Object.entries(CATEGORY)) if (types.includes(type)) return name;
@@ -165,6 +165,12 @@ function showJoinScreen(visible) {
 
 let view = null; // { map, area, toLngLat, toLocal, bounds, ready }
 let spawnType = null; // the monster type placed by the next map click, or null when not spawning
+let orderTarget = null; // 'all' or a monster id while the next map click places a moveTo order; null otherwise
+let selectedId = null; // the monster whose individual orders the panel shows, or null
+let latestMonsters = []; // monsters and group order from the last state, for the orders panel
+let latestGroupOrder = null;
+const orderTypes = new Set(); // monster types that obey orders (welcome.monsterTypes[].orders)
+let online = false; // joined and the map is drawn: buttons that talk to the game work
 let sendToGame = () => {};
 
 /** Creates the map the first time; on later joins only refreshes the buildings. Resolves when layers exist. */
@@ -254,6 +260,7 @@ function showArea(area) {
     wireHover(map);
     wireControls(map);
     wireSpawning(map);
+    wireOrders(map);
     frameArea(map, view.bounds);
     resolve();
   }));
@@ -275,21 +282,34 @@ function clearLiveLayers() {
   for (const source of LIVE_SOURCES) view.map.getSource(source).setData(EMPTY);
   document.getElementById('zones').innerHTML = '';
   updateMonsterCounts([]);
+  latestMonsters = [];
+  latestGroupOrder = null;
+  for (const pin of orderPins.values()) pin.marker.remove();
+  orderPins.clear();
+  selectMonster(null);
+}
+
+/** What the next map click does: place a monster (`spawn` type), place a moveTo order (`order` target), or neither. */
+function setClickMode({ spawn = null, order = null } = {}) {
+  const map = view.map;
+  const spawnButton = [...document.querySelectorAll('.spawn-btn')].find((b) => b.dataset.type === spawn);
+  spawnType = spawnButton && !spawnButton.disabled ? spawn : null;
+  orderTarget = spawnType ? null : order;
+  for (const b of document.querySelectorAll('.spawn-btn')) b.classList.toggle('active', b.dataset.type === spawnType);
+  for (const b of document.querySelectorAll('.order-btn[data-kind="moveTo"]')) {
+    b.classList.toggle('active', orderTarget !== null && (b.dataset.target === 'all') === (orderTarget === 'all'));
+  }
+  // CSS crosshair that hover can't override
+  map.getContainer().classList.toggle('spawning', spawnType !== null || orderTarget !== null);
+  map.setPaintProperty('spawn-zone-fill', 'fill-opacity', spawnType ? 0.3 : 0.1); // show where clicks can land
+  updateOrderPanel();
 }
 
 function wireSpawning(map) {
-  const spawnButtons = document.querySelectorAll('.spawn-btn');
-  const setSpawnType = (type) => {
-    const button = [...spawnButtons].find((b) => b.dataset.type === type);
-    spawnType = button && !button.disabled ? type : null;
-    for (const b of spawnButtons) b.classList.toggle('active', b.dataset.type === spawnType);
-    map.getContainer().classList.toggle('spawning', spawnType !== null); // CSS crosshair that hover can't override
-    map.setPaintProperty('spawn-zone-fill', 'fill-opacity', spawnType ? 0.3 : 0.1); // show where clicks can land
-  };
-  for (const b of spawnButtons) {
-    b.addEventListener('click', () => setSpawnType(spawnType === b.dataset.type ? null : b.dataset.type));
+  for (const b of document.querySelectorAll('.spawn-btn')) {
+    b.addEventListener('click', () => setClickMode({ spawn: spawnType === b.dataset.type ? null : b.dataset.type }));
   }
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setSpawnType(null); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setClickMode(); });
 
   document.getElementById('recenter').addEventListener('click', () => frameArea(map, view.bounds));
 
@@ -303,9 +323,164 @@ function wireSpawning(map) {
       `<b>Game</b> x ${local.x.toFixed(1)}, z ${local.z.toFixed(1)}${inside ? '' : ' <span class="warn">(outside play area)</span>'}<br>` +
       `<b>GPS</b> ${lat.toFixed(6)}, ${lng.toFixed(6)}`;
 
-    // The game decides whether the spawn is allowed; the page only asks.
-    if (spawnType) sendToGame({ t: 'spawn', type: spawnType, x: local.x, z: local.z });
+    // The game decides whether the spawn or order is allowed; the page only asks.
+    if (spawnType) {
+      sendToGame({ t: 'spawn', type: spawnType, x: local.x, z: local.z });
+    } else if (orderTarget !== null) {
+      sendOrder(orderTarget, 'moveTo', local);
+      setClickMode();
+    } else {
+      selectMonster(monsterAt(map, e.point)?.properties.id ?? null);
+    }
   });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Orders: the map player asks, the game decides and reports them in each state (PROTOCOL.md, "Orders")
+// ---------------------------------------------------------------------------------------------------------------
+
+const ORDER_DRAG_SEND_MS = 200; // how often a dragged pin re-sends its moveTo
+const ORDER_PIN_HOLD_MS = 1000; // after a drop, how long the pin ignores state while the game catches up
+const orderPins = new Map(); // 'all' or monster id -> { marker, dragging, holdUntil, lastSent }
+
+function sendOrder(target, kind, point) {
+  const msg = { t: 'order', target, kind };
+  if (point) Object.assign(msg, { x: Math.round(point.x * 100) / 100, z: Math.round(point.z * 100) / 100 });
+  sendToGame(msg);
+}
+
+/** The monster dot nearest a screen point, within finger reach. */
+function monsterAt(map, point) {
+  const r = 14;
+  const hits = map.queryRenderedFeatures([[point.x - r, point.y - r], [point.x + r, point.y + r]], { layers: ['monster-dot'] });
+  let best = null, bestDistance = Infinity;
+  for (const f of hits) {
+    const p = map.project(f.geometry.coordinates);
+    const d = Math.hypot(p.x - point.x, p.y - point.y);
+    if (d < bestDistance) { best = f; bestDistance = d; }
+  }
+  return best;
+}
+
+function selectMonster(id) {
+  selectedId = id;
+  if (orderTarget !== null && orderTarget !== 'all') orderTarget = null; // a pending "Move to…" was for the old one
+  if (view?.map.getLayer('monster-selected')) view.map.setFilter('monster-selected', ['==', ['get', 'id'], id ?? -1]);
+  if (view) setClickMode({ spawn: spawnType, order: orderTarget });
+  else updateOrderPanel();
+}
+
+function wireOrders(map) {
+  map.on('mouseenter', 'monster-dot', () => { map.getCanvas().style.cursor = 'pointer'; });
+  map.on('mouseleave', 'monster-dot', () => { map.getCanvas().style.cursor = ''; });
+  for (const b of document.querySelectorAll('.order-btn')) {
+    b.addEventListener('click', () => {
+      const target = b.dataset.target === 'all' ? 'all' : selectedId;
+      if (target === null) return;
+      if (b.dataset.kind === 'moveTo') {
+        setClickMode({ order: orderTarget === target ? null : target });
+      } else {
+        setClickMode();
+        sendOrder(target, b.dataset.kind);
+      }
+    });
+  }
+}
+
+function capitalise(text) {
+  return text ? text[0].toUpperCase() + text.slice(1) : text;
+}
+
+/** One monster's current order in words. */
+function orderText(order) {
+  if (!order) return 'acting on its own';
+  if (order.from === 'group') return order.kind === 'stay' ? 'holding with the group' : 'moving to the group flag';
+  return order.kind === 'stay' ? 'holding (your order)' : 'moving to its pin (your order)';
+}
+
+function updateOrderPanel() {
+  const box = document.getElementById('orders');
+  box.hidden = orderTypes.size === 0;
+  for (const b of box.querySelectorAll('.order-btn[data-target="all"]')) b.disabled = !online;
+
+  const selected = latestMonsters.find((m) => m.id === selectedId);
+  const g = latestGroupOrder;
+  document.getElementById('order-status').textContent =
+    orderTarget === 'all' ? 'Click the map where they should go. Esc to cancel.'
+    : orderTarget !== null ? `Click the map where #${selectedId} should go. Esc to cancel.`
+    : !g ? 'No group order: monsters act on their own. Tap a monster for its own orders.'
+    : g.kind === 'stay' ? 'Group order: stay where they are.'
+    : 'Group order: move to the flag. Drag it to redirect them.';
+
+  const panel = document.getElementById('selected');
+  panel.hidden = !selected;
+  if (!selected) return;
+  const obeys = orderTypes.has(selected.type);
+  document.getElementById('selected-name').textContent = `${capitalise(selected.type)} #${selected.id}`;
+  document.getElementById('selected-order').textContent = obeys ? orderText(selected.order) : "doesn't take orders";
+  for (const b of panel.querySelectorAll('.order-btn')) b.disabled = !online || !obeys;
+}
+
+/** A draggable pin for a moveTo point; dragging re-sends the order, the game's reply moves it via state. */
+function createOrderPin(target, point) {
+  const el = document.createElement('div');
+  el.className = target === 'all' ? 'order-pin' : 'order-pin individual';
+  el.textContent = target === 'all' ? 'ALL' : `#${target}`;
+  el.title = target === 'all' ? 'Group move-to point: drag to redirect' : `Move-to point for #${target}: drag to redirect`;
+  el.addEventListener('click', (e) => e.stopPropagation()); // a tap on the pin isn't a map click
+
+  // The tip under the pin marks the point, so a monster standing on it stays visible and tappable.
+  const marker = new maplibregl.Marker({ element: el, draggable: true, anchor: 'bottom', offset: [0, -8] })
+    .setLngLat(view.toLngLat(point.x, point.z)).addTo(view.map);
+  const pin = { marker, dragging: false, holdUntil: 0, lastSent: 0 };
+  const send = () => {
+    const { lng, lat } = marker.getLngLat();
+    sendOrder(target, 'moveTo', view.toLocal(lng, lat));
+    pin.lastSent = performance.now();
+  };
+  marker.on('dragstart', () => { pin.dragging = true; });
+  marker.on('drag', () => { if (performance.now() - pin.lastSent > ORDER_DRAG_SEND_MS) send(); });
+  marker.on('dragend', () => {
+    pin.dragging = false;
+    pin.holdUntil = performance.now() + ORDER_PIN_HOLD_MS;
+    send();
+  });
+  orderPins.set(target, pin);
+  return pin;
+}
+
+/** Pins for the group moveTo and each individual moveTo, placed where the game says; removed when the order ends. */
+function updateOrderPins(groupOrder, monsters) {
+  const wanted = new Map();
+  if (groupOrder?.kind === 'moveTo') wanted.set('all', groupOrder);
+  for (const m of monsters) if (m.order?.kind === 'moveTo' && m.order.from === 'individual') wanted.set(m.id, m.order);
+
+  for (const [target, pin] of orderPins) {
+    if (!wanted.has(target) && !pin.dragging) {
+      pin.marker.remove();
+      orderPins.delete(target);
+    }
+  }
+  const now = performance.now();
+  for (const [target, point] of wanted) {
+    const pin = orderPins.get(target);
+    if (!pin) createOrderPin(target, point);
+    else if (!pin.dragging && now > pin.holdUntil) pin.marker.setLngLat(view.toLngLat(point.x, point.z));
+  }
+}
+
+/** Dashed lines from monsters to the point they were ordered to. */
+function orderLineFeatures(monsters, toLngLat) {
+  return {
+    type: 'FeatureCollection',
+    features: monsters
+      .filter((m) => m.order?.kind === 'moveTo' && Math.hypot(m.order.x - m.x, m.order.z - m.z) > 3)
+      .map((m) => ({
+        type: 'Feature',
+        properties: { from: m.order.from },
+        geometry: { type: 'LineString', coordinates: [toLngLat(m.x, m.z), toLngLat(m.order.x, m.order.z)] },
+      })),
+  };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -474,8 +649,34 @@ function addMonsterLayers(map) {
     paint: { 'line-color': OVERLORD_COLOR, 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [1, 1.5] },
   });
 
+  // Orders: a dashed line to each monster's move-to point (gold for the group, white for its own order).
+  map.addSource('order-lines', { type: 'geojson', data: EMPTY });
+  map.addLayer({
+    id: 'order-line', type: 'line', source: 'order-lines',
+    layout: { 'line-cap': 'round' },
+    paint: {
+      'line-color': ['case', ['==', ['get', 'from'], 'group'], '#e0b84f', '#ffffff'],
+      'line-width': 1.5, 'line-opacity': 0.6, 'line-dasharray': [2, 2],
+    },
+  });
+
   const isOverlord = ['==', ['get', 'type'], 'overlord'];
   map.addSource('monsters', { type: 'geojson', data: EMPTY });
+  // A ring around monsters under a stay order, and a highlight on the one selected for individual orders.
+  map.addLayer({
+    id: 'monster-stay', type: 'circle', source: 'monsters', filter: ['==', ['get', 'order'], 'stay'],
+    paint: {
+      'circle-radius': ['case', isOverlord, 13, 10], 'circle-opacity': 0,
+      'circle-stroke-width': 2, 'circle-stroke-opacity': 0.8,
+      'circle-stroke-color': ['case', ['==', ['get', 'from'], 'group'], '#e0b84f', '#ffffff'],
+    },
+  });
+  map.addLayer({
+    id: 'monster-selected', type: 'circle', source: 'monsters', filter: ['==', ['get', 'id'], -1],
+    // A soft filled halo, so it can't be mistaken for the unfilled stay rings.
+    paint: { 'circle-radius': ['case', isOverlord, 20, 16], 'circle-color': '#ffffff', 'circle-opacity': 0.28,
+      'circle-blur': 0.4 },
+  });
   map.addLayer({
     id: 'monster-alert', type: 'circle', source: 'monsters', filter: ['==', ['get', 'sees'], true],
     paint: { 'circle-radius': ['case', isOverlord, 18, 13], 'circle-color': '#ffb347', 'circle-opacity': 0.35 },
@@ -513,7 +714,7 @@ function monsterFeatures(monsters, toLngLat) {
     type: 'FeatureCollection',
     features: monsters.map((m) => ({
       type: 'Feature',
-      properties: { id: m.id, type: m.type, sees: m.sees },
+      properties: { id: m.id, type: m.type, sees: m.sees, order: m.order?.kind ?? 'none', from: m.order?.from ?? '' },
       geometry: { type: 'Point', coordinates: toLngLat(m.x, m.z) },
     })),
   };
@@ -802,7 +1003,9 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
   const setStatus = (text, state) => {
     status.textContent = text;
     status.dataset.state = state;
-    for (const b of document.querySelectorAll('.spawn-btn')) b.disabled = state !== 'connected' && state !== 'warning';
+    online = state === 'connected' || state === 'warning';
+    for (const b of document.querySelectorAll('.spawn-btn')) b.disabled = !online;
+    updateOrderPanel();
   };
 
   // Back to the join screen, leaving the status line in a sensible state behind it.
@@ -830,13 +1033,16 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     zoneDefs = msg.zones ?? [];
     callRange = msg.callRange ?? callRange;
     for (const key of Object.keys(monsterLimits)) delete monsterLimits[key]; // a restarted game may drop limits
-    for (const { type, cost, limit } of msg.monsterTypes ?? []) {
+    orderTypes.clear();
+    for (const { type, cost, limit, orders } of msg.monsterTypes ?? []) {
       monsterCosts[type] = cost;
       if (limit !== undefined) monsterLimits[type] = limit;
+      if (orders === true) orderTypes.add(type);
       const label = document.querySelector(`.spawn-btn[data-type="${CSS.escape(type)}"] [data-cost]`);
       if (label) label.textContent = cost;
     }
     updateMonsterCounts([]);
+    document.getElementById('order-who').textContent = [...orderTypes].map((t) => `${t}s`).join(' & ');
     view.map.getSource('zones').setData(zoneFeatures(zoneDefs, [], view.toLngLat));
     view.map.getSource('spawn-zone').setData(spawnZoneFeatures(msg.spawnZone, view.toLngLat));
     updateZonePanel(zoneDefs, []);
@@ -865,6 +1071,12 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     map.getSource('heard').setData(heardFeatures(monsters, toLngLat));
     map.getSource('network').setData(networkFeatures(monsters, callRange, toLngLat));
     map.getSource('commands').setData(commandFeatures(monsters, toLngLat));
+    map.getSource('order-lines').setData(orderLineFeatures(monsters, toLngLat));
+    latestMonsters = monsters;
+    latestGroupOrder = msg.groupOrder ?? null;
+    updateOrderPins(latestGroupOrder, monsters);
+    if (selectedId !== null && !monsters.some((m) => m.id === selectedId)) selectMonster(null); // it died
+    else updateOrderPanel();
     lastMonsterPositions.clear();
     for (const m of monsters) lastMonsterPositions.set(m.id, { x: m.x, z: m.z });
     const zones = zoneFeatures(zoneDefs, msg.zones, toLngLat);
@@ -923,6 +1135,8 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         recentKills.push({ kind: 'monster', x: msg.x, z: msg.z, at: performance.now() / 1000, seconds: KILL_MARKER_SECONDS });
         drawKills(view.map, view.toLngLat);
         showToast(`Your ${msg.type} #${msg.id} was killed`, false);
+      } else if (msg.t === 'orderResult') {
+        if (!msg.ok) showToast(`Order refused: ${msg.reason}`, false);
       } else if (msg.t === 'supplyPlane') {
         const { x1, z1, x2, z2, show } = msg;
         supplyPlanes.push({ x1, z1, x2, z2, at: performance.now() / 1000, seconds: show > 0 ? show : 30 });
@@ -1037,7 +1251,7 @@ function wireZoneHover(map) {
   map.on('mouseleave', 'zone-fill', hide);
   map.on('click', (e) => {
     const hit = map.queryRenderedFeatures(e.point, { layers: ['zone-fill'] });
-    if (hit.length && !spawnType) show({ ...e, features: hit });
+    if (hit.length && !spawnType && orderTarget === null && !monsterAt(map, e.point)) show({ ...e, features: hit });
     else if (!hit.length) hide();
   });
   refreshZonePopup = (zones) => {

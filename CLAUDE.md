@@ -32,7 +32,10 @@ Libraries: MapLibre GL JS 4.7.1 from unpkg, pinned. No npm, no bundler; keep it 
 2. Send `join`; on `joinResult` ok, wait for `welcome`, which carries the whole map (`area`). The map is created on
    the first `welcome`; later joins only refresh its data.
 3. Ignore `state` and events until `welcome` is handled, then redraw from each `state` (10 Hz).
-4. If the connection drops after joining, reconnect with the same password. "Wrong password." on a reconnect means the
+4. Orders (`order` message): the page only asks. Pins, rings and lines come from `state.groupOrder` and
+   `monsters[].order`; a dragged pin is the one thing drawn from local input, and only until the game catches up.
+   Which types obey comes from `welcome.monsterTypes[].orders`, never from a list in the page.
+5. If the connection drops after joining, reconnect with the same password. "Wrong password." on a reconnect means the
    host restarted: back to the join screen with that explanation.
 
 ## Rules of thumb

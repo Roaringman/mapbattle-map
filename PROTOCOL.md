@@ -76,7 +76,8 @@ must ignore `state` and events until it has finished handling `welcome`.
   "originEasting": 680680.32, "originNorthing": 6156136.38, "sendRate": 10,
   "area": { ... },
   "callRange": 100,
-  "monsterTypes": [ { "type": "crawler", "cost": 1, "limit": 8 }, { "type": "overlord", "cost": 3, "limit": 1 } ],
+  "monsterTypes": [ { "type": "crawler", "cost": 1, "limit": 8, "orders": true },
+                    { "type": "overlord", "cost": 3, "limit": 1, "orders": true } ],
   "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50 } ],
   "spawnZone": { "x": -250, "z": 250, "size": 100 }
 }
@@ -90,7 +91,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `sendRate` | `state` messages per second. |
 | `area` | The whole play area (about 285 KB), described below. |
 | `callRange` | Metres a monster's yell carries; used to draw the monster network. Optional. |
-| `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. |
+| `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers and overlords take orders; later types may not. |
 | `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. |
 | `spawnZone` | The only place monsters may be spawned: centre (`x`, `z`) and side length `size`, a square aligned to the grid in the north-west corner of the play area. Optional; absent means anywhere in the play area. |
 
@@ -125,6 +126,7 @@ must ignore `state` and events until it has finished handling `welcome`.
   "player": { "x": 1.2, "z": 3.4, "y": 0.05, "yaw": 90 },
   "lastSeen": { "x": 1.2, "z": 3.4, "yaw": 90, "ago": 12.5 },
   "deaths": 1, "energy": 2.4, "energyRate": 0.5, "maxEnergy": 5,
+  "groupOrder": { "kind": "moveTo", "x": -120.5, "z": 80.25 },
   "monsters": [ … ],
   "zones": [ { "id": 1, "progress": 0.4, "held": false, "playerProgress": 0, "playerHeld": false,
                "status": "capturing", "monsters": 2 } ]
@@ -138,6 +140,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `lastSeen` | Where the player was last seen, present only while hidden and after at least one sighting. `ago` in seconds. |
 | `deaths` | Times the monsters have killed the FPS player this session. |
 | `energy`, `energyRate`, `maxEnergy` | Spawn energy, current gain per second (base + held zones), maximum. |
+| `groupOrder` | Optional. The order given to all monsters (`target: "all"`): `{ "kind": "moveTo", "x", "z" }` with the point the game accepted (after snapping), or `{ "kind": "stay" }`. Absent or `null` when there is none. See [Orders](#orders). |
 | `monsters` | All of the map player's monsters, see below. |
 | `zones[].progress` | 0 = neutral, 1 = fully monster-held. |
 | `zones[].held` | Held by the monsters (stays true until drained back to 0). |
@@ -159,7 +162,8 @@ there. That is deliberate.
 
 ```json
 { "id": 3, "type": "crawler", "x": 10, "z": -40, "yaw": 180, "range": 30, "fov": 120, "sees": false,
-  "heard": { "bearing": 12.5, "fade": 0.8 }, "directing": [4, 7] }
+  "heard": { "bearing": 12.5, "fade": 0.8 }, "directing": [4, 7],
+  "order": { "kind": "moveTo", "x": -120.5, "z": 80.25, "from": "group" } }
 ```
 
 | Field | Notes |
@@ -170,6 +174,7 @@ there. That is deliberate.
 | `sees` | This monster can see the FPS player right now. |
 | `heard` | Optional. A recent gunshot: `bearing` from the monster towards it, `fade` 1 → 0 over a few seconds. Never the shooter's position. |
 | `directing` | Optional, overlords only. Ids of crawlers it is currently sending towards the player. |
+| `order` | Optional. The order this monster is following: `kind` `moveTo` or `stay`; `x`, `z` the point it is going to or holding (for a group `stay`, the spot this monster holds); `from` `individual` (given to this monster) or `group` (it is following `groupOrder`). Absent when the monster acts on its own. See [Orders](#orders). |
 
 ### Events
 
@@ -180,6 +185,7 @@ there. That is deliberate.
 | `playerKilled` | `by`, `byType`, `x`, `z`, `respawnIn`, `deaths` | The FPS player died. `by`/`byType` is the monster that dealt the last hit and (`x`, `z`) where it saw them fall; all four are absent if no monster gets the credit. The player is out of the game (nothing can see them) for `respawnIn` seconds, then respawns at the start point. `deaths` is the new total. |
 | `yell` | `id`, `from`, `wave`, `x`, `z`, `range` | Monster `id` yelled at (`x`, `z`), heard within `range` m. `from` is the monster it was answering, or -1 if it started the alarm. Yells in one alarm share a `wave`. |
 | `supplyPlane` | `x1`, `z1`, `x2`, `z2`, `show` | A supply plane flew straight from (`x1`, `z1`) to (`x2`, `z2`) and has left the map. See below. |
+| `orderResult` | `ok`, `target`, `kind`, `reason` | Sent **only when an `order` is refused** (`ok: false`); accepted orders show up in the next `state`. `target` and `kind` echo the order. See [Orders](#orders). |
 | `pong` | | Reply to `ping`. |
 
 #### `supplyPlane`
@@ -205,9 +211,58 @@ usually a few seconds before the crate lands.
 | Message | Fields | Meaning |
 |---|---|---|
 | `spawn` | `type`, `x`, `z` | Ask to place a monster. The game checks every rule and replies with `spawnResult`. |
+| `order` | `target`, `kind`, `x`, `z` | Give monsters an order. See [Orders](#orders). The game replies only on refusal (`orderResult`). |
 | `ping` | | Connection check; the game replies `pong`. |
 
 Messages over 64 KB close the connection.
+
+### Orders
+
+The map player can tell monsters where to go and when to hold still. Only monsters whose type has `orders: true` in
+`welcome.monsterTypes` obey (crawlers and overlords today). Orders cost no energy.
+
+```json
+{ "t": "order", "target": "all", "kind": "moveTo", "x": -120.5, "z": 80.25 }
+{ "t": "order", "target": "all", "kind": "stay" }
+{ "t": "order", "target": "all", "kind": "release" }
+{ "t": "order", "target": 3, "kind": "moveTo", "x": 12, "z": -40 }
+{ "t": "order", "target": 3, "kind": "stay" }
+{ "t": "order", "target": 3, "kind": "release" }
+```
+
+| Field | Notes |
+|---|---|
+| `target` | `"all"` for a **group order** (every obeying monster without an individual order), or a monster `id` for an **individual order**. |
+| `kind` | `moveTo` (needs `x`, `z`), `stay`, or `release` (cancel). |
+| `x`, `z` | Local metres, `moveTo` only. |
+
+**Rules the game enforces** (the client only asks and draws `state`):
+
+1. **Who obeys.** Monsters of types with `orders: true`. A group order skips the others; an individual order to one of
+   them is refused (`That monster doesn't take orders`).
+2. **Priority, per monster:** its individual order, then an overlord directing it (`directing`), then the group order,
+   then its own behaviour. A group order never replaces an individual one, so the map player can keep a sentry while
+   moving the rest.
+3. **`moveTo`.** Crawlers walk (navmesh), overlords fly to the point, then stay near it until the order changes. Group
+   members gather around the point, spread a few metres apart rather than stacking. The game may move the point to
+   the nearest reachable spot; `groupOrder` / `monsters[].order` carry the point actually used. A new `moveTo` with
+   the same target simply replaces the point: the client sends one every ~200 ms while the map player **drags** the
+   point, and one on release.
+4. **`stay`.** The monster holds the spot where it is when the order arrives (each group member its own spot), still
+   turning and looking around as usual.
+5. **`release`.** Individual: the monster goes back to the group order if there is one, otherwise its own behaviour.
+   Group (`target: "all"`): clears the group order **and every individual order**: everyone acts on their own.
+6. **Senses and fighting don't change.** A monster under orders still sees, hears, yells and reports `sees`. If it
+   sees the player it attacks as it would anyway; once it loses them it returns to its order. Zone capture works for
+   monsters standing in a zone, ordered or not.
+7. **New monsters** of an obeying type join the current group order when they spawn.
+8. **Several map players** share the monsters: any map player's order applies, the last one wins, and every page
+   shows the result through `state`.
+9. **Limits.** Accept at least 10 orders a second per connection; refuse beyond that with `Too many orders`.
+   Orders end when the monster dies.
+
+Order refusal reasons: `No such monster`, `That monster doesn't take orders`, `Outside the play area`,
+`No reachable ground near that point`, `Too many orders`, `Unknown order '…'`. The client shows them as-is.
 
 ## Spawn refusal reasons (current)
 

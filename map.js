@@ -203,7 +203,6 @@ function showArea(area) {
         { id: 'background', type: 'background', paint: { 'background-color': '#151a20' } },
         {
           id: 'osm', type: 'raster', source: 'osm',
-          layout: { visibility: 'none' },
           paint: { 'raster-opacity': 0.55, 'raster-saturation': -0.7 },
         },
       ],
@@ -213,8 +212,14 @@ function showArea(area) {
     minZoom: 13,
     maxZoom: 20,
     attributionControl: { compact: false },
+    // North stays up: no rotating by mouse, touch or keyboard (the 3D toggle only tilts).
+    dragRotate: false,
+    pitchWithRotate: false,
+    touchPitch: false,
   });
-  map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'top-right');
+  map.touchZoomRotate.disableRotation();
+  map.keyboard.disableRotation();
+  map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
   map.addControl(new maplibregl.ScaleControl({ unit: 'metric' }), 'bottom-left');
 
   view = { map, area, toLngLat, toLocal: makeLngLatToLocal(area), bounds: boundsOf(boundary) };
@@ -1314,14 +1319,11 @@ function wireZoneHover(map) {
 }
 
 function wireControls(map) {
-  document.getElementById('toggle-osm').addEventListener('change', (e) => {
-    map.setLayoutProperty('osm', 'visibility', e.target.checked ? 'visible' : 'none');
-  });
   document.getElementById('toggle-3d').addEventListener('change', (e) => {
     const on = e.target.checked;
     map.setLayoutProperty('buildings-3d', 'visibility', on ? 'visible' : 'none');
     map.setLayoutProperty('buildings-fill', 'visibility', on ? 'none' : 'visible');
-    map.easeTo({ pitch: on ? 55 : 0, bearing: on ? -20 : 0, duration: 800 });
+    map.easeTo({ pitch: on ? 55 : 0, duration: 800 });
   });
 }
 

@@ -19,6 +19,8 @@ const COLOURS = { house: '#c9a27a', outbuilding: '#7d8a96', farm: '#a3875b', oth
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
 const OVERLORD_COLOR = '#4fd1c5';
+const HOUND_COLOR = '#c8763a';
+const HOUND_SCENT_COLOR = '#ff5f1f';
 const ZONE_NEUTRAL = '#d9d6cf';
 const ZONE_MONSTER = '#a77bff';
 const ZONE_PLAYER = '#ff5a4f';
@@ -651,7 +653,8 @@ function updateOrderPanel() {
   if (selected.length === 1) {
     const [m] = selected;
     name.textContent = `${capitalise(m.type)} #${m.id}`;
-    detail.textContent = orderable.length ? orderText(m.order) : "doesn't take orders";
+    detail.textContent = m.scent ? 'on the scent: following the trail'
+      : orderable.length ? orderText(m.order) : "doesn't take orders";
   } else {
     const counts = {};
     for (const m of selected) counts[m.type] = (counts[m.type] ?? 0) + 1;
@@ -865,7 +868,8 @@ function addMonsterLayers(map) {
   map.addLayer({
     id: 'cone-fill', type: 'fill', source: 'cones',
     paint: {
-      'fill-color': ['case', ['get', 'sees'], '#ffb347', ['==', ['get', 'type'], 'overlord'], OVERLORD_COLOR, '#a77bff'],
+      'fill-color': ['case', ['get', 'sees'], '#ffb347', ['==', ['get', 'type'], 'overlord'], OVERLORD_COLOR,
+        ['==', ['get', 'type'], 'bloodhound'], HOUND_COLOR, '#a77bff'],
       'fill-opacity': ['case', ['get', 'sees'], 0.22, 0.08],
     },
   });
@@ -934,15 +938,45 @@ function addMonsterLayers(map) {
     id: 'monster-alert', type: 'circle', source: 'monsters', filter: ['==', ['get', 'sees'], true],
     paint: { 'circle-radius': ['case', isOverlord, 18, 13], 'circle-color': '#ffb347', 'circle-opacity': 0.35 },
   });
+  // Blood hounds on the scent (monsters[].scent): a pulsing ring, animated by animateScent while any hound has it.
+  map.addLayer({
+    id: 'monster-scent', type: 'circle', source: 'monsters', filter: ['==', ['get', 'scent'], true],
+    paint: {
+      'circle-radius': 10, 'circle-opacity': 0,
+      'circle-stroke-color': HOUND_SCENT_COLOR, 'circle-stroke-width': 2.5, 'circle-stroke-opacity': 0.9,
+    },
+  });
+  const isHound = ['==', ['get', 'type'], 'bloodhound'];
+  const onScent = ['==', ['get', 'scent'], true];
   map.addLayer({
     id: 'monster-dot', type: 'circle', source: 'monsters',
     paint: {
-      'circle-radius': ['case', isOverlord, 8, 5],
-      'circle-color': ['case', isOverlord, OVERLORD_COLOR, '#a77bff'],
-      'circle-stroke-color': ['case', isOverlord, '#e8fffd', '#1a1030'],
-      'circle-stroke-width': ['case', isOverlord, 2.5, 1.5],
+      'circle-radius': ['case', isOverlord, 8, onScent, 7, 5],
+      'circle-color': ['case', isOverlord, OVERLORD_COLOR, onScent, HOUND_SCENT_COLOR, isHound, HOUND_COLOR, '#a77bff'],
+      'circle-stroke-color': ['case', isOverlord, '#e8fffd', onScent, '#ffffff', '#1a1030'],
+      'circle-stroke-width': ['case', isOverlord, 2.5, onScent, 2, 1.5],
     },
   });
+}
+
+const SCENT_PULSE_SECONDS = 1.2;
+let scentAnimating = false;
+
+/** Pulses the scent ring outwards while at least one hound is on the trail; stops itself when none are. */
+function animateScent(map) {
+  if (!latestMonsters.some((m) => m.scent)) {
+    scentAnimating = false;
+    return;
+  }
+  scentAnimating = true;
+  const phase = (performance.now() / 1000 / SCENT_PULSE_SECONDS) % 1;
+  map.setPaintProperty('monster-scent', 'circle-radius', 8 + phase * 14);
+  map.setPaintProperty('monster-scent', 'circle-stroke-opacity', 0.9 * (1 - phase));
+  requestAnimationFrame(() => animateScent(map));
+}
+
+function startScentAnimation(map) {
+  if (!scentAnimating && latestMonsters.some((m) => m.scent)) animateScent(map);
 }
 
 /** Lines from each overlord to the crawlers it is currently directing. */
@@ -967,7 +1001,10 @@ function monsterFeatures(monsters, toLngLat) {
     type: 'FeatureCollection',
     features: monsters.map((m) => ({
       type: 'Feature',
-      properties: { id: m.id, type: m.type, sees: m.sees, order: m.order?.kind ?? 'none', from: m.order?.from ?? '' },
+      properties: {
+        id: m.id, type: m.type, sees: m.sees, scent: m.scent === true,
+        order: m.order?.kind ?? 'none', from: m.order?.from ?? '',
+      },
       geometry: { type: 'Point', coordinates: toLngLat(m.x, m.z) },
     })),
   };
@@ -1375,6 +1412,7 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     map.getSource('commands').setData(commandFeatures(monsters, toLngLat));
     map.getSource('order-lines').setData(orderLineFeatures(monsters, toLngLat));
     latestMonsters = monsters;
+    startScentAnimation(map);
     latestGroupOrder = msg.groupOrder ?? null;
     updateOrderPins(latestGroupOrder, monsters);
     // Drop selected monsters that died, without cancelling a pending "Move to…" for the rest.
@@ -1442,6 +1480,17 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         recentKills.push({ kind: 'monster', x: msg.x, z: msg.z, at: performance.now() / 1000, seconds: KILL_MARKER_SECONDS });
         drawKills(view.map, view.toLngLat);
         showToast(`Your ${msg.type} #${msg.id} was killed`, false);
+      } else if (msg.t === 'onTrail') {
+        // Switch the hound's symbol now rather than at the next state; state.monsters[].scent says the same.
+        const hound = latestMonsters.find((m) => m.id === msg.id);
+        if (hound) {
+          hound.scent = msg.onTrail === true;
+          view.map.getSource('monsters').setData(monsterFeatures(latestMonsters, view.toLngLat));
+          startScentAnimation(view.map);
+          updateOrderPanel();
+        }
+        showToast(msg.onTrail ? `Bloodhound #${msg.id} picked up the scent!` : `Bloodhound #${msg.id} lost the trail`,
+          msg.onTrail === true);
       } else if (msg.t === 'gameOver') {
         showToast(`${WINNER_TEXT[msg.winner] ?? 'Game over'} (${Math.floor(msg.monsters)} – ${Math.floor(msg.player)})`, msg.winner === 'monsters');
       } else if (msg.t === 'orderResult') {

@@ -356,7 +356,7 @@ function zoneFeatures(defs, states, toLngLat) {
       const s = byId.get(z.id) ?? { progress: 0, held: false, status: 'idle' };
       return {
         type: 'Feature',
-        properties: { name: z.name, progress: s.progress, held: s.held, status: s.status },
+        properties: { id: z.id, name: z.name, progress: s.progress, held: s.held, status: s.status, monsters: s.monsters ?? 0 },
         geometry: { type: 'Polygon', coordinates: [squareRing(z, toLngLat)] },
       };
     }),
@@ -376,6 +376,16 @@ const ZONE_STATUS_TEXT = {
   reclaiming: 'player is taking it back',
   contested: 'contested',
 };
+
+/** Popup text for a control zone: what state it is in now, and what zones are for. */
+function zonePopupHtml(p) {
+  const status = ZONE_STATUS_TEXT[p.status] ?? (p.held ? 'held by your monsters' : 'neutral');
+  const inside = p.monsters ? ` · ${p.monsters} monster${p.monsters === 1 ? '' : 's'} inside` : '';
+  return `<b>${escapeHtml(p.name)}</b> <span class="dim">control zone</span><br>` +
+    `${status[0].toUpperCase()}${status.slice(1)} · ${Math.round(p.progress * 100)}% yours${inside}<br>` +
+    '<span class="dim">Keep monsters inside to capture it. Held zones raise your energy gain. ' +
+    'The player takes it back by standing in it alone.</span>';
+}
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -797,7 +807,9 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     map.getSource('commands').setData(commandFeatures(monsters, toLngLat));
     lastMonsterPositions.clear();
     for (const m of monsters) lastMonsterPositions.set(m.id, { x: m.x, z: m.z });
-    map.getSource('zones').setData(zoneFeatures(zoneDefs, msg.zones, toLngLat));
+    const zones = zoneFeatures(zoneDefs, msg.zones, toLngLat);
+    map.getSource('zones').setData(zones);
+    refreshZonePopup(zones);
     updateZonePanel(zoneDefs, msg.zones);
     updateEnergy(msg);
     updateMonsterCounts(monsters);
@@ -934,6 +946,38 @@ function wireHover(map) {
     map.getCanvas().style.cursor = '';
     popup.remove();
   });
+
+  wireZoneHover(map);
+}
+
+/** Keeps an open zone popup current as state messages arrive; set by wireZoneHover. */
+let refreshZonePopup = () => {};
+
+/** Zone info on hover, or on tap for phones. Buildings inside a zone keep their own popup. */
+function wireZoneHover(map) {
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8, maxWidth: '260px' });
+  let zoneId = null;
+  const show = (e) => {
+    if (map.queryRenderedFeatures(e.point, { layers: ['buildings-fill'] }).length) return hide();
+    const p = e.features[0].properties;
+    zoneId = p.id;
+    popup.setLngLat(e.lngLat).setHTML(zonePopupHtml(p)).addTo(map);
+  };
+  const hide = () => {
+    zoneId = null;
+    popup.remove();
+  };
+  map.on('mousemove', 'zone-fill', show);
+  map.on('mouseleave', 'zone-fill', hide);
+  map.on('click', (e) => {
+    const hit = map.queryRenderedFeatures(e.point, { layers: ['zone-fill'] });
+    if (hit.length && !spawnType) show({ ...e, features: hit });
+    else if (!hit.length) hide();
+  });
+  refreshZonePopup = (zones) => {
+    const f = zoneId === null ? null : zones.features.find((z) => z.properties.id === zoneId);
+    if (f) popup.setHTML(zonePopupHtml(f.properties));
+  };
 }
 
 function wireControls(map) {

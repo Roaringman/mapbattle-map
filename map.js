@@ -823,7 +823,25 @@ function updateSighting(msg) {
 
 const YELL_SECONDS = 3;
 const YELL_RING_GROW_SECONDS = 0.8;
-const activeYells = [];
+const YELL_RING_MIN_GAP_SECONDS = 5; // at most one new ring this often, however much the monsters call
+const activeYells = []; // { x, z, range, at, ring, fromX, fromZ }
+const ringedWaves = new Set(); // alarms that already got their ring
+let lastYellRingAt = -Infinity;
+
+/**
+ * Keeps call-outs readable: only the first yell of an alarm (wave) gets a ring, and not more often than
+ * YELL_RING_MIN_GAP_SECONDS. Answers are drawn as a faint line from the caller. The monsters still call as before.
+ */
+function addYell(msg, from) {
+  const now = performance.now() / 1000;
+  const ring = !ringedWaves.has(msg.wave) && now - lastYellRingAt >= YELL_RING_MIN_GAP_SECONDS;
+  ringedWaves.add(msg.wave);
+  if (ringedWaves.size > 100) ringedWaves.delete(ringedWaves.values().next().value);
+  if (ring) lastYellRingAt = now;
+  if (!ring && !from) return false; // nothing to draw
+  activeYells.push({ x: msg.x, z: msg.z, range: msg.range, at: now, ring, fromX: from?.x, fromZ: from?.z });
+  return true;
+}
 
 function addNetworkLayers(map) {
   map.addSource('network', { type: 'geojson', data: EMPTY });
@@ -834,12 +852,12 @@ function addNetworkLayers(map) {
   map.addSource('yells', { type: 'geojson', data: EMPTY });
   map.addLayer({
     id: 'yell-ring', type: 'line', source: 'yells', filter: ['==', ['get', 'kind'], 'ring'],
-    paint: { 'line-color': '#ff7ad9', 'line-width': 2, 'line-opacity': ['get', 'fade'] },
+    paint: { 'line-color': '#ff7ad9', 'line-width': 1.5, 'line-opacity': ['*', 0.7, ['get', 'fade']] },
   });
   map.addLayer({
     id: 'yell-link', type: 'line', source: 'yells', filter: ['==', ['get', 'kind'], 'link'],
     layout: { 'line-cap': 'round' },
-    paint: { 'line-color': '#ff7ad9', 'line-width': 3, 'line-opacity': ['get', 'fade'] },
+    paint: { 'line-color': '#ff7ad9', 'line-width': 1.5, 'line-opacity': ['*', 0.45, ['get', 'fade']] },
   });
 }
 
@@ -860,7 +878,7 @@ function networkFeatures(allMonsters, callRange, toLngLat) {
   return { type: 'FeatureCollection', features };
 }
 
-/** Animates yell rings (growing to the call range) and answer links until they fade out. */
+/** Animates the alarm rings (growing to the call range) and answer links until they fade out. */
 function animateYells(map, toLngLat) {
   const now = performance.now() / 1000;
   while (activeYells.length && now - activeYells[0].at > YELL_SECONDS) activeYells.shift();
@@ -869,13 +887,15 @@ function animateYells(map, toLngLat) {
   for (const y of activeYells) {
     const age = now - y.at;
     const fade = 1 - age / YELL_SECONDS;
-    const radius = y.range * Math.min(1, age / YELL_RING_GROW_SECONDS);
-    const ring = [];
-    for (let i = 0; i <= 48; i++) {
-      const a = (i / 48) * Math.PI * 2;
-      ring.push(toLngLat(y.x + Math.sin(a) * radius, y.z + Math.cos(a) * radius));
+    if (y.ring) {
+      const radius = y.range * Math.min(1, age / YELL_RING_GROW_SECONDS);
+      const ring = [];
+      for (let i = 0; i <= 48; i++) {
+        const a = (i / 48) * Math.PI * 2;
+        ring.push(toLngLat(y.x + Math.sin(a) * radius, y.z + Math.cos(a) * radius));
+      }
+      features.push({ type: 'Feature', properties: { kind: 'ring', fade }, geometry: { type: 'LineString', coordinates: ring } });
     }
-    features.push({ type: 'Feature', properties: { kind: 'ring', fade }, geometry: { type: 'LineString', coordinates: ring } });
     if (y.fromX !== undefined) {
       features.push({
         type: 'Feature', properties: { kind: 'link', fade },
@@ -1161,8 +1181,7 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
       } else if (msg.t === 'yell') {
         const from = lastMonsterPositions.get(msg.from);
         const wasIdle = activeYells.length === 0;
-        activeYells.push({ x: msg.x, z: msg.z, range: msg.range, at: performance.now() / 1000, fromX: from?.x, fromZ: from?.z });
-        if (wasIdle) animateYells(view.map, view.toLngLat);
+        if (addYell(msg, from) && wasIdle) animateYells(view.map, view.toLngLat);
       } else if (msg.t === 'killed') {
         recentKills.push({ kind: 'monster', x: msg.x, z: msg.z, at: performance.now() / 1000, seconds: KILL_MARKER_SECONDS });
         drawKills(view.map, view.toLngLat);

@@ -21,7 +21,9 @@ const EMPTY = { type: 'FeatureCollection', features: [] };
 const OVERLORD_COLOR = '#4fd1c5';
 const ZONE_NEUTRAL = '#d9d6cf';
 const ZONE_MONSTER = '#a77bff';
-const LIVE_SOURCES = ['player', 'last-seen', 'monsters', 'cones', 'heard', 'kills', 'zones', 'network', 'yells', 'commands'];
+const SPAWN_ZONE_COLOR = '#6cc070';
+const LIVE_SOURCES = ['player', 'last-seen', 'monsters', 'cones', 'heard', 'kills', 'zones', 'spawn-zone', 'network',
+  'yells', 'commands'];
 
 function categoryOf(type) {
   for (const [name, types] of Object.entries(CATEGORY)) if (types.includes(type)) return name;
@@ -267,6 +269,7 @@ function clearLiveLayers() {
   if (!view?.map.getSource('player')) return;
   for (const source of LIVE_SOURCES) view.map.getSource(source).setData(EMPTY);
   document.getElementById('zones').innerHTML = '';
+  updateMonsterCounts([]);
 }
 
 function wireSpawning(map) {
@@ -276,6 +279,7 @@ function wireSpawning(map) {
     spawnType = button && !button.disabled ? type : null;
     for (const b of spawnButtons) b.classList.toggle('active', b.dataset.type === spawnType);
     map.getContainer().classList.toggle('spawning', spawnType !== null); // CSS crosshair that hover can't override
+    map.setPaintProperty('spawn-zone-fill', 'fill-opacity', spawnType ? 0.3 : 0.1); // show where clicks can land
   };
   for (const b of spawnButtons) {
     b.addEventListener('click', () => setSpawnType(spawnType === b.dataset.type ? null : b.dataset.type));
@@ -323,6 +327,23 @@ function addZoneLayers(map) {
       'line-width': 2.5,
     },
   }, 'buildings-fill');
+
+  // Where monsters may be spawned (welcome.spawnZone). Fill strengthens while a spawn button is active.
+  map.addSource('spawn-zone', { type: 'geojson', data: EMPTY });
+  map.addLayer({
+    id: 'spawn-zone-fill', type: 'fill', source: 'spawn-zone',
+    paint: { 'fill-color': SPAWN_ZONE_COLOR, 'fill-opacity': 0.1 },
+  }, 'buildings-fill');
+  map.addLayer({
+    id: 'spawn-zone-outline', type: 'line', source: 'spawn-zone',
+    paint: { 'line-color': SPAWN_ZONE_COLOR, 'line-width': 2.5, 'line-dasharray': [2, 1.5] },
+  }, 'buildings-fill');
+}
+
+/** A grid-aligned square given by its centre and side length, as a closed lon/lat ring. */
+function squareRing({ x, z, size }, toLngLat) {
+  const h = size / 2;
+  return [[-h, -h], [h, -h], [h, h], [-h, h], [-h, -h]].map(([dx, dz]) => toLngLat(x + dx, z + dz));
 }
 
 /** Zone squares (from the welcome message) with their live state (from each state message). */
@@ -332,14 +353,20 @@ function zoneFeatures(defs, states, toLngLat) {
     type: 'FeatureCollection',
     features: defs.map((z) => {
       const s = byId.get(z.id) ?? { progress: 0, held: false, status: 'idle' };
-      const h = z.size / 2;
-      const ring = [[-h, -h], [h, -h], [h, h], [-h, h], [-h, -h]].map(([dx, dz]) => toLngLat(z.x + dx, z.z + dz));
       return {
         type: 'Feature',
         properties: { name: z.name, progress: s.progress, held: s.held, status: s.status },
-        geometry: { type: 'Polygon', coordinates: [ring] },
+        geometry: { type: 'Polygon', coordinates: [squareRing(z, toLngLat)] },
       };
     }),
+  };
+}
+
+function spawnZoneFeatures(zone, toLngLat) {
+  if (!zone) return EMPTY;
+  return {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [squareRing(zone, toLngLat)] } }],
   };
 }
 
@@ -590,8 +617,21 @@ function drawKills(map, toLngLat) {
   });
 }
 
-/** Energy cost per monster type, from the game's welcome message. */
+/** Energy cost and alive-at-once limit per monster type, from the game's welcome message. */
 const monsterCosts = {};
+const monsterLimits = {};
+
+/** "3/8" on each spawn button: monsters of that type in the latest state, out of the game's limit. */
+function updateMonsterCounts(monsters) {
+  const counts = {};
+  for (const m of monsters) counts[m.type] = (counts[m.type] ?? 0) + 1;
+  for (const b of document.querySelectorAll('.spawn-btn')) {
+    const limit = monsterLimits[b.dataset.type];
+    const n = counts[b.dataset.type] ?? 0;
+    b.querySelector('[data-count]').textContent = limit === undefined ? '' : ` · ${n}/${limit}`;
+    b.classList.toggle('full', limit !== undefined && n >= limit);
+  }
+}
 
 let toastTimer = 0;
 function showToast(text, ok) {
@@ -699,12 +739,16 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     await showArea(msg.area);
     zoneDefs = msg.zones ?? [];
     callRange = msg.callRange ?? callRange;
-    for (const { type, cost } of msg.monsterTypes ?? []) {
+    for (const key of Object.keys(monsterLimits)) delete monsterLimits[key]; // a restarted game may drop limits
+    for (const { type, cost, limit } of msg.monsterTypes ?? []) {
       monsterCosts[type] = cost;
-      const label = document.querySelector(`.spawn-btn[data-type="${type}"] [data-cost]`);
+      if (limit !== undefined) monsterLimits[type] = limit;
+      const label = document.querySelector(`.spawn-btn[data-type="${CSS.escape(type)}"] [data-cost]`);
       if (label) label.textContent = cost;
     }
+    updateMonsterCounts([]);
     view.map.getSource('zones').setData(zoneFeatures(zoneDefs, [], view.toLngLat));
+    view.map.getSource('spawn-zone').setData(spawnZoneFeatures(msg.spawnZone, view.toLngLat));
     updateZonePanel(zoneDefs, []);
     ready = true;
     setStatus(`Connected to game${name ? ` as ${name}` : ''}`, 'connected');
@@ -736,6 +780,7 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     map.getSource('zones').setData(zoneFeatures(zoneDefs, msg.zones, toLngLat));
     updateZonePanel(zoneDefs, msg.zones);
     updateEnergy(msg);
+    updateMonsterCounts(monsters);
     updateSighting(msg);
     drawKills(map, toLngLat);
   };

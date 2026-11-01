@@ -45,7 +45,8 @@
     .spawn-btn small { display: block; font-weight: 400; opacity: 0.75; }
     .spawn-btn:hover:not(:disabled) { border-color: var(--c); }
     .spawn-btn.active { background: var(--c); color: #10141a; }
-    .spawn-btn.short:not(.active) { opacity: 0.55; }
+    .spawn-btn.short:not(.active), .spawn-btn.full:not(.active) { opacity: 0.55; }
+    .spawn-btn.full [data-count] { color: #e07a5f; opacity: 1; }
     .spawn-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .energy { height: 6px; margin: 8px 0 4px; border-radius: 3px; background: #2c343d; overflow: hidden; }
     #energy-fill { height: 100%; width: 0; background: #a77bff; transition: width 0.2s linear; }
@@ -113,14 +114,15 @@
       <span style="--c:#7d8a96">Outbuilding</span>
       <span style="--c:#a3875b">Farm</span>
       <span style="--c:#b8b0a4">Other</span>
+      <span style="--c:#6cc070">Spawn zone</span>
     </div>
     <div class="spawn-box">
       <div class="spawn-buttons">
         <button class="spawn-btn" data-type="crawler" type="button" disabled title="Then click the map. Esc to stop.">
-          Crawler<small>cost <span data-cost>1</span></small></button>
+          Crawler<small>cost <span data-cost>1</span><span data-count></span></small></button>
         <button class="spawn-btn" data-type="overlord" type="button" disabled
           title="Flies, sees 60 m all around, directs crawlers within 100 m to the player. Then click the map.">
-          Overlord<small>cost <span data-cost>3</span></small></button>
+          Overlord<small>cost <span data-cost>3</span><span data-count></span></small></button>
       </div>
       <div class="energy"><div id="energy-fill"></div></div>
       <div class="dim">Energy <span id="energy-text">–</span></div>

@@ -76,8 +76,9 @@ must ignore `state` and events until it has finished handling `welcome`.
   "originEasting": 680680.32, "originNorthing": 6156136.38, "sendRate": 10,
   "area": { ... },
   "callRange": 100,
-  "monsterTypes": [ { "type": "crawler", "cost": 1 }, { "type": "overlord", "cost": 3 } ],
-  "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50 } ]
+  "monsterTypes": [ { "type": "crawler", "cost": 1, "limit": 8 }, { "type": "overlord", "cost": 3, "limit": 1 } ],
+  "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50 } ],
+  "spawnZone": { "x": -250, "z": 250, "size": 100 }
 }
 ```
 
@@ -89,8 +90,9 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `sendRate` | `state` messages per second. |
 | `area` | The whole play area (about 285 KB), described below. |
 | `callRange` | Metres a monster's yell carries; used to draw the monster network. Optional. |
-| `monsterTypes` | Spawnable types and their energy cost. Optional. |
+| `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. |
 | `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. |
+| `spawnZone` | The only place monsters may be spawned: centre (`x`, `z`) and side length `size`, a square aligned to the grid in the north-west corner of the play area. Optional; absent means anywhere in the play area. |
 
 #### `area`
 
@@ -122,7 +124,7 @@ must ignore `state` and events until it has finished handling `welcome`.
   "t": "state", "time": 123.45,
   "player": { "x": 1.2, "z": 3.4, "y": 0.05, "yaw": 90 },
   "lastSeen": { "x": 1.2, "z": 3.4, "yaw": 90, "ago": 12.5 },
-  "energy": 2.4, "energyRate": 0.5, "maxEnergy": 5,
+  "deaths": 1, "energy": 2.4, "energyRate": 0.5, "maxEnergy": 5,
   "monsters": [ … ],
   "zones": [ { "id": 1, "progress": 0.4, "held": false, "status": "capturing", "monsters": 2 } ]
 }
@@ -133,6 +135,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `time` | Game time in seconds. |
 | `player` | The FPS player **only while a monster sees them** (position as the monster saw it), otherwise `null`. |
 | `lastSeen` | Where the player was last seen, present only while hidden and after at least one sighting. `ago` in seconds. |
+| `deaths` | Times the monsters have killed the FPS player this session. |
 | `energy`, `energyRate`, `maxEnergy` | Spawn energy, current gain per second (base + held zones), maximum. |
 | `monsters` | All of the map player's monsters, see below. |
 | `zones[].progress` | 0 = neutral, 1 = fully monster-held. |
@@ -164,6 +167,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 |---|---|---|
 | `spawnResult` | `ok`, `type`, `x`, `z`, `reason` | Reply to `spawn`. `reason` is a human-readable refusal, empty on success. |
 | `killed` | `id`, `type`, `x`, `z` | One of the map player's monsters died there. |
+| `playerKilled` | `by`, `byType`, `x`, `z`, `respawnIn`, `deaths` | The FPS player died. `by`/`byType` is the monster that dealt the last hit and (`x`, `z`) where it saw them fall; all four are absent if no monster gets the credit. The player is out of the game (nothing can see them) for `respawnIn` seconds, then respawns at the start point. `deaths` is the new total. |
 | `yell` | `id`, `from`, `wave`, `x`, `z`, `range` | Monster `id` yelled at (`x`, `z`), heard within `range` m. `from` is the monster it was answering, or -1 if it started the alarm. Yells in one alarm share a `wave`. |
 | `pong` | | Reply to `ping`. |
 
@@ -178,6 +182,7 @@ Messages over 64 KB close the connection.
 
 ## Spawn refusal reasons (current)
 
-`Unknown monster type '…'`, `The map is still loading`, `Outside the play area`, `Monster limit reached (12)`,
+`Unknown monster type '…'`, `The map is still loading`, `Outside the play area`, `Outside the spawn zone`,
+`Crawler limit reached (8)`, `Overlord limit reached (1)`, `Monster limit reached (12)`,
 `Not enough energy`, `Inside a building`, `Not walkable ground`, `Too close to the player`,
 `The player can see that spot`. The client shows them as-is; it should not depend on the exact wording.

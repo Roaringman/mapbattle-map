@@ -258,6 +258,12 @@ must drop everything from the previous game: monsters, kill and death markers, y
 marker, orders, the end screen and any pending spawn or order. It then handles the `welcome` exactly as after
 joining (it may skip re-drawing the map if `area` hasn't changed).
 
+The game also closes and reopens its listening socket for every new game. Joined pages normally keep their
+connection. If the socket can't be reopened while they are connected, the game closes their connections with
+WebSocket close code **1012** (service restart) right after `newGame`; the page should then rejoin with the same
+password (the usual reconnect), and it gets the new game's `welcome` on joining. When the host stops Play, open
+connections are closed with code 1001 (going away).
+
 What the new game starts with: no monsters, energy back at its start value, every zone neutral, both victory
 scores 0, `deaths` 0, no group order, and the FPS player alive at the start point. Monster `id`s keep counting up
 across games, so an id is never reused within a session. `welcome.game` (and `newGame.game`) is the game number in

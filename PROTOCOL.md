@@ -81,7 +81,8 @@ must ignore `state` and events until it has finished handling `welcome`.
   "area": { ... },
   "callRange": 100,
   "monsterTypes": [ { "type": "crawler", "cost": 1, "limit": 8, "orders": true },
-                    { "type": "overlord", "cost": 3, "limit": 1, "orders": true } ],
+                    { "type": "overlord", "cost": 3, "limit": 1, "orders": true },
+                    { "type": "bloodhound", "cost": 1, "limit": 6, "groupMoveTo": true } ],
   "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50 } ],
   "spawnZones": [ { "id": 1, "name": "North-west", "x": -250, "z": 250, "size": 100 },
                   { "id": 2, "name": "South-east", "x": 250, "z": -250, "size": 100 } ],
@@ -97,7 +98,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `sendRate` | `state` messages per second. |
 | `area` | The whole play area (about 285 KB), described below. |
 | `callRange` | Metres a monster's yell carries; used to draw the monster network. Optional. |
-| `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers and overlords take orders; later types may not. |
+| `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers and overlords take orders; later types may not. `groupMoveTo`: optional, on a type without `orders`; its monsters follow a **group `moveTo`** and nothing else (blood hounds). |
 | `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. |
 | `spawnZones` | The places monsters are spawned into (two today): `id`, a short `name` for the popup, centre (`x`, `z`) and side length `size`, squares aligned to the grid. The game decides where they are. See [Spawning](#spawning). |
 | `game` | Optional. Number of this game in the session, starting at 1; goes up with every [New game](#new-game). |
@@ -179,10 +180,11 @@ there. That is deliberate.
 | Field | Notes |
 |---|---|
 | `id` | Unique for the session. |
-| `type` | `crawler` or `overlord` (see `welcome.monsterTypes`). |
+| `type` | `crawler`, `overlord` or `bloodhound` (see `welcome.monsterTypes`). |
 | `range`, `fov` | Sight distance (m) and view cone width (degrees, 360 = all round). |
 | `sees` | This monster can see the FPS player right now. |
 | `heard` | Optional. A recent gunshot: `bearing` from the monster towards it, `fade` 1 → 0 over a few seconds. Never the shooter's position. |
+| `scent` | Optional, blood hounds only. `true` while the hound follows the FPS player's scent trail. The trail itself is never sent. |
 | `directing` | Optional, overlords only. Ids of crawlers it is currently sending towards the player. |
 | `order` | Optional. The order this monster is following: `kind` `moveTo` or `stay`; `x`, `z` the point it is going to or holding (for a group `stay`, the spot this monster holds); `from` `individual` (given to this monster) or `group` (it is following `groupOrder`). Absent when the monster acts on its own. See [Orders](#orders). |
 
@@ -194,6 +196,7 @@ there. That is deliberate.
 | `killed` | `id`, `type`, `x`, `z` | One of the map player's monsters died there. |
 | `playerKilled` | `by`, `byType`, `x`, `z`, `respawnIn`, `deaths` | The FPS player died. `by`/`byType` is the monster that dealt the last hit and (`x`, `z`) where it saw them fall; all four are absent if no monster gets the credit. The player is out of the game (nothing can see them) for `respawnIn` seconds, then respawns at the start point. `deaths` is the new total. |
 | `yell` | `id`, `from`, `wave`, `x`, `z`, `range` | Monster `id` yelled at (`x`, `z`), heard within `range` m. `from` is the monster it was answering, or -1 if it started the alarm. Yells in one alarm share a `wave`. |
+| `onTrail` | `id`, `onTrail` | Blood hound `id` picked up the FPS player's scent trail (`onTrail: true`) or lost it (`false`: the trail faded or went cold where the player died). Use it to switch the hound's symbol; `state.monsters[].scent` carries the same, for pages that join later. No "lost" event when a hound dies on the trail (`killed` says enough). The trail itself is never sent. |
 | `supplyPlane` | `x1`, `z1`, `x2`, `z2`, `show`, `incoming` | A supply plane is flying (`incoming: true`, sent as it appears) or flew (older games, sent after it left) straight from (`x1`, `z1`) to (`x2`, `z2`). See below. |
 | `gameOver` | `winner`, `player`, `monsters` | A side reached the victory target. `winner` is `player` (the FPS player), `monsters` (the map side) or `draw`; `player`/`monsters` are the final scores. Sent once; see [Victory](#victory). |
 | `newGame` | `game` | The host started a new game in the same session. Clear the old match; a fresh `welcome` follows. See [New game](#new-game). |
@@ -304,10 +307,12 @@ The map player can tell monsters where to go and when to hold still. Only monste
 **Rules the game enforces** (the client only asks and draws `state`):
 
 1. **Who obeys.** Monsters of types with `orders: true`. A group order skips the others; an individual order to one of
-   them is refused (`That monster doesn't take orders`).
+   them is refused (`That monster doesn't take orders`). Types with `groupMoveTo: true` (blood hounds) also follow a
+   group `moveTo`; a group `stay` cancels their share of it, and individual orders to them are refused.
 2. **Priority, per monster:** its individual order, then an overlord directing it (`directing`), then the group order,
    then its own behaviour. A group order never replaces an individual one, so the map player can keep a sentry while
-   moving the rest.
+   moving the rest. Exception: a blood hound on the scent (`scent: true`) follows the trail ahead of overlords and the
+   group order; only chasing a player it sees comes first.
 3. **`moveTo`.** Crawlers walk (navmesh), overlords fly to the point, then stay near it until the order changes. Group
    members gather around the point, spread a few metres apart rather than stacking. The game may move the point to
    the nearest reachable spot; `groupOrder` / `monsters[].order` carry the point actually used. A new `moveTo` with
@@ -352,6 +357,6 @@ on placing them.
 4. The new monster joins the current group order, if any (see [Orders](#orders)).
 
 Spawn refusal reasons: `Unknown monster type '…'`, `No such spawn zone`, `No free spot in that spawn zone`,
-`Crawler limit reached (8)`, `Overlord limit reached (1)`, `Monster limit reached (12)`, `Not enough energy`,
+`Crawler limit reached (8)`, `Overlord limit reached (1)`, `Bloodhound limit reached (6)`, `Monster limit reached (12)`, `Not enough energy`,
 `The map is still loading`, `The game is over`. The client shows them as-is; it should not depend on the exact
 wording.

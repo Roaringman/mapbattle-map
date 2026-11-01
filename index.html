@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MapBattle Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <style>
+    :root {
+      --panel: rgba(18, 22, 28, 0.92);
+      --text: #e6e2da;
+      --dim: #8d949c;
+      --accent: #e0b84f;
+    }
+    html, body { margin: 0; height: 100%; background: #151a20; color: var(--text);
+      font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    #map { position: absolute; inset: 0; }
+    .panel { position: absolute; top: 12px; left: 12px; z-index: 1; max-width: min(320px, calc(100vw - 80px));
+      background: var(--panel); border: 1px solid #2c343d; border-radius: 8px; padding: 12px 14px; }
+    .panel h1 { margin: 0 0 2px; font-size: 16px; letter-spacing: 0.02em; color: var(--accent); }
+    .panel .dim, .maplibregl-popup .dim { color: var(--dim); font-size: 12px; }
+    .panel label { display: flex; gap: 8px; align-items: center; margin-top: 8px; cursor: pointer; }
+    #coords { margin-top: 10px; padding-top: 8px; border-top: 1px solid #2c343d; font-variant-numeric: tabular-nums; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--dim); }
+    .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+      margin-right: 5px; vertical-align: -1px; background: var(--c); }
+    .warn { color: #e07a5f; }
+    #sighting { margin-top: 4px; font-size: 13px; font-weight: 600; color: var(--dim); }
+    #sighting:empty { display: none; }
+    #sighting[data-state="spotted"] { color: #ff5a4f; }
+    #sighting[data-state="lost"] { color: #c9c3b8; }
+    #connection { margin-top: 6px; font-size: 12px; color: var(--dim); }
+    #connection::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      margin-right: 6px; background: var(--dim); }
+    #connection[data-state="connected"] { color: var(--text); }
+    #connection[data-state="connected"]::before { background: #6cc070; }
+    #connection[data-state="warning"]::before, #connection[data-state="offline"]::before { background: #e07a5f; }
+    .spawn-box { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2c343d; }
+    .spawn-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .spawn-btn { --c: #a77bff; padding: 8px 6px; border-radius: 6px; cursor: pointer; font: inherit; font-weight: 600;
+      border: 1px solid color-mix(in srgb, var(--c) 60%, black); background: color-mix(in srgb, var(--c) 18%, #151a20);
+      color: #ece6ff; }
+    .spawn-btn[data-type="overlord"] { --c: #4fd1c5; }
+    .spawn-btn small { display: block; font-weight: 400; opacity: 0.75; }
+    .spawn-btn:hover:not(:disabled) { border-color: var(--c); }
+    .spawn-btn.active { background: var(--c); color: #10141a; }
+    .spawn-btn.short:not(.active) { opacity: 0.55; }
+    .spawn-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .energy { height: 6px; margin: 8px 0 4px; border-radius: 3px; background: #2c343d; overflow: hidden; }
+    #energy-fill { height: 100%; width: 0; background: #a77bff; transition: width 0.2s linear; }
+    #toast { margin-top: 6px; font-size: 12px; color: #e07a5f; }
+    #toast[data-ok="true"] { color: #6cc070; }
+    #zones:not(:empty) { margin-top: 10px; display: grid; gap: 4px; }
+    .zone { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; font-size: 12px; }
+    .zone-name { font-weight: 600; }
+    .zone-bar { height: 5px; border-radius: 3px; background: #2c343d; overflow: hidden; }
+    .zone-bar span { display: block; height: 100%; background: #a77bff; }
+    .zone-label { color: var(--dim); }
+    .zone[data-held="true"] .zone-label { color: #c9b3ff; }
+    .zone[data-status="contested"] .zone-label { color: #ffb347; }
+    .zone[data-status="reclaiming"] .zone-label { color: #ff5a4f; }
+    #map.spawning .maplibregl-canvas { cursor: crosshair !important; }
+    #recenter { margin-top: 10px; width: 100%; padding: 6px 8px; border-radius: 6px; cursor: pointer;
+      border: 1px solid #3a444f; background: #222a33; color: var(--text); font: inherit; }
+    #recenter:hover { border-color: var(--accent); }
+    #join { position: absolute; inset: 0; z-index: 10; display: grid; place-items: center; padding: 16px;
+      background: radial-gradient(ellipse at top, #1e2731, #0d1116 70%); }
+    #join[hidden] { display: none; }
+    .join-card { width: min(380px, 100%); background: var(--panel); border: 1px solid #2c343d; border-radius: 10px;
+      padding: 20px 22px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45); }
+    .join-card h1 { margin: 0; font-size: 22px; color: var(--accent); letter-spacing: 0.02em; }
+    .join-card p { margin: 6px 0 16px; color: var(--dim); }
+    .join-card label { display: block; margin-top: 12px; font-size: 12px; color: var(--dim); }
+    .join-card input { box-sizing: border-box; width: 100%; margin-top: 4px; padding: 9px 10px; border-radius: 6px;
+      border: 1px solid #3a444f; background: #10151b; color: var(--text); font: inherit; }
+    .join-card input:focus { outline: none; border-color: var(--accent); }
+    #join-password { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 0.08em;
+      text-transform: uppercase; }
+    #join-button { width: 100%; margin-top: 18px; padding: 10px; border: 0; border-radius: 6px; cursor: pointer;
+      background: var(--accent); color: #1a1408; font: inherit; font-weight: 700; }
+    #join-button:disabled { opacity: 0.6; cursor: wait; }
+    #join-error { min-height: 1.4em; margin-top: 10px; color: #e07a5f; font-size: 13px; }
+    .join-card .fine { margin: 14px 0 0; font-size: 11px; }
+    .maplibregl-popup-content { background: var(--panel); color: var(--text); padding: 8px 10px; border-radius: 6px; }
+    .maplibregl-popup-tip { display: none; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="join">
+    <form id="join-form" class="join-card" autocomplete="off">
+      <h1>MapBattle</h1>
+      <p>Command the monsters. Hunt the player through the streets of Jystrup.</p>
+      <label for="join-name">Your name</label>
+      <input id="join-name" maxlength="20" placeholder="Shown to the host">
+      <label for="join-password">Password from the host</label>
+      <input id="join-password" placeholder="XXXX-XXXX-XXXX" spellcheck="false">
+      <label for="join-server">Game server</label>
+      <input id="join-server" spellcheck="false" placeholder="wss://…trycloudflare.com">
+      <button id="join-button" type="submit">Join</button>
+      <div id="join-error" role="alert"></div>
+      <p class="fine">The host sends you a link and a password. The password changes every game.</p>
+    </form>
+  </div>
+  <div class="panel">
+    <h1>MapBattle</h1>
+    <div id="summary" class="dim">Not connected</div>
+    <div id="connection" data-state="offline">Not connected</div>
+    <div id="sighting" data-state="hidden"></div>
+    <div class="legend">
+      <span style="--c:#c9a27a">House</span>
+      <span style="--c:#7d8a96">Outbuilding</span>
+      <span style="--c:#a3875b">Farm</span>
+      <span style="--c:#b8b0a4">Other</span>
+    </div>
+    <div class="spawn-box">
+      <div class="spawn-buttons">
+        <button class="spawn-btn" data-type="crawler" type="button" disabled title="Then click the map. Esc to stop.">
+          Crawler<small>cost <span data-cost>1</span></small></button>
+        <button class="spawn-btn" data-type="overlord" type="button" disabled
+          title="Flies, sees 60 m all around, directs crawlers within 100 m to the player. Then click the map.">
+          Overlord<small>cost <span data-cost>3</span></small></button>
+      </div>
+      <div class="energy"><div id="energy-fill"></div></div>
+      <div class="dim">Energy <span id="energy-text">–</span></div>
+      <div id="toast" hidden></div>
+      <div id="zones"></div>
+    </div>
+    <label><input type="checkbox" id="toggle-3d"> 3D buildings</label>
+    <label><input type="checkbox" id="toggle-osm"> Street map underlay</label>
+    <button id="recenter" type="button">Recentre on play area</button>
+    <div id="coords" class="dim">Click the map to see game coordinates.</div>
+  </div>
+  <script type="module" src="./map.js"></script>
+</body>
+</html>

@@ -60,8 +60,10 @@
     .zone-name { font-weight: 600; }
     .zone-bar { height: 5px; border-radius: 3px; background: #2c343d; overflow: hidden; }
     .zone-bar span { display: block; height: 100%; background: #a77bff; }
+    .zone-bar span.player { background: #ff5a4f; }
     .zone-label { color: var(--dim); }
     .zone[data-held="true"] .zone-label { color: #c9b3ff; }
+    .zone[data-player-held="true"] .zone-label { color: #ff8a80; }
     .zone[data-status="contested"] .zone-label { color: #ffb347; }
     .zone[data-status="reclaiming"] .zone-label { color: #ff5a4f; }
     #map.spawning .maplibregl-canvas { cursor: crosshair !important; }

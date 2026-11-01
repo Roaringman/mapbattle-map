@@ -21,9 +21,11 @@ const EMPTY = { type: 'FeatureCollection', features: [] };
 const OVERLORD_COLOR = '#4fd1c5';
 const ZONE_NEUTRAL = '#d9d6cf';
 const ZONE_MONSTER = '#a77bff';
+const ZONE_PLAYER = '#ff5a4f';
 const SPAWN_ZONE_COLOR = '#6cc070';
+const SUPPLY_PLANE_COLOR = '#7fb8ff';
 const LIVE_SOURCES = ['player', 'last-seen', 'monsters', 'cones', 'heard', 'kills', 'zones', 'spawn-zone', 'network',
-  'yells', 'commands'];
+  'yells', 'commands', 'supply-planes'];
 
 function categoryOf(type) {
   for (const [name, types] of Object.entries(CATEGORY)) if (types.includes(type)) return name;
@@ -246,6 +248,7 @@ function showArea(area) {
 
     addZoneLayers(map);
     addNetworkLayers(map);
+    addSupplyPlaneLayers(map);
     addMonsterLayers(map);
     addPlayerLayers(map);
     wireHover(map);
@@ -266,6 +269,7 @@ function updateSummary(area) {
 function clearLiveLayers() {
   recentKills.length = 0;
   activeYells.length = 0;
+  supplyPlanes.length = 0;
   playerRespawnAt = 0;
   if (!view?.map.getSource('player')) return;
   for (const source of LIVE_SOURCES) view.map.getSource(source).setData(EMPTY);
@@ -314,9 +318,12 @@ function addZoneLayers(map) {
   map.addLayer({
     id: 'zone-fill', type: 'fill', source: 'zones',
     paint: {
-      'fill-color': ['case', ['get', 'held'], ZONE_MONSTER,
+      'fill-color': ['case', ['get', 'held'], ZONE_MONSTER, ['get', 'playerHeld'], ZONE_PLAYER,
+        ['>', ['get', 'playerProgress'], 0],
+        ['interpolate', ['linear'], ['get', 'playerProgress'], 0, ZONE_NEUTRAL, 1, ZONE_PLAYER],
         ['interpolate', ['linear'], ['get', 'progress'], 0, ZONE_NEUTRAL, 1, ZONE_MONSTER]],
-      'fill-opacity': ['case', ['get', 'held'], 0.35, ['+', 0.1, ['*', 0.2, ['get', 'progress']]]],
+      'fill-opacity': ['case', ['any', ['get', 'held'], ['get', 'playerHeld']], 0.35,
+        ['+', 0.1, ['*', 0.2, ['max', ['get', 'progress'], ['get', 'playerProgress']]]]],
     },
   }, 'buildings-fill');
   map.addLayer({
@@ -324,7 +331,7 @@ function addZoneLayers(map) {
     paint: {
       'line-color': ['match', ['get', 'status'],
         'contested', '#ffb347', 'reclaiming', '#ff5a4f', 'capturing', ZONE_MONSTER,
-        ['case', ['get', 'held'], ZONE_MONSTER, ZONE_NEUTRAL]],
+        ['case', ['get', 'held'], ZONE_MONSTER, ['get', 'playerHeld'], ZONE_PLAYER, ZONE_NEUTRAL]],
       'line-width': 2.5,
     },
   }, 'buildings-fill');
@@ -353,10 +360,13 @@ function zoneFeatures(defs, states, toLngLat) {
   return {
     type: 'FeatureCollection',
     features: defs.map((z) => {
-      const s = byId.get(z.id) ?? { progress: 0, held: false, status: 'idle' };
+      const s = zoneState(byId, z.id);
       return {
         type: 'Feature',
-        properties: { id: z.id, name: z.name, progress: s.progress, held: s.held, status: s.status, monsters: s.monsters ?? 0 },
+        properties: {
+          id: z.id, name: z.name, progress: s.progress, held: s.held, status: s.status, monsters: s.monsters,
+          playerProgress: s.playerProgress, playerHeld: s.playerHeld,
+        },
         geometry: { type: 'Polygon', coordinates: [squareRing(z, toLngLat)] },
       };
     }),
@@ -373,18 +383,32 @@ function spawnZoneFeatures(zone, toLngLat) {
 
 const ZONE_STATUS_TEXT = {
   capturing: 'capturing',
-  reclaiming: 'player is taking it back',
+  reclaiming: 'player is capturing it',
   contested: 'contested',
 };
 
+/** A zone's live state with the optional player-side fields filled in. */
+function zoneState(byId, id) {
+  const s = byId.get(id) ?? { progress: 0, held: false, status: 'idle' };
+  return { ...s, playerProgress: s.playerProgress ?? 0, playerHeld: s.playerHeld === true, monsters: s.monsters ?? 0 };
+}
+
+/** Idle zones are described by who holds them. */
+function zoneIdleText(s, monsterHeldText) {
+  return s.held ? monsterHeldText : s.playerHeld ? 'held by the player' : 'neutral';
+}
+
 /** Popup text for a control zone: what state it is in now, and what zones are for. */
 function zonePopupHtml(p) {
-  const status = ZONE_STATUS_TEXT[p.status] ?? (p.held ? 'held by your monsters' : 'neutral');
+  const status = ZONE_STATUS_TEXT[p.status] ?? zoneIdleText(p, 'held by your monsters');
+  const share = p.playerProgress > 0
+    ? `${Math.round(p.playerProgress * 100)}% the player's`
+    : `${Math.round(p.progress * 100)}% yours`;
   const inside = p.monsters ? ` · ${p.monsters} monster${p.monsters === 1 ? '' : 's'} inside` : '';
   return `<b>${escapeHtml(p.name)}</b> <span class="dim">control zone</span><br>` +
-    `${status[0].toUpperCase()}${status.slice(1)} · ${Math.round(p.progress * 100)}% yours${inside}<br>` +
-    '<span class="dim">Keep monsters inside to capture it. Held zones raise your energy gain. ' +
-    'The player takes it back by standing in it alone.</span>';
+    `${status[0].toUpperCase()}${status.slice(1)} · ${share}${inside}<br>` +
+    '<span class="dim">Keep monsters inside to capture it; held zones raise your energy gain. ' +
+    'The player captures it by standing in it alone, and each zone they hold earns them supply drops.</span>';
 }
 
 function escapeHtml(text) {
@@ -395,11 +419,15 @@ function updateZonePanel(defs, states) {
   const list = document.getElementById('zones');
   const byId = new Map((states ?? []).map((s) => [s.id, s]));
   list.innerHTML = defs.map((z) => {
-    const s = byId.get(z.id) ?? { progress: 0, held: false, status: 'idle' };
-    const label = ZONE_STATUS_TEXT[s.status] ?? (s.held ? 'held' : 'neutral');
-    return `<div class="zone" data-status="${escapeHtml(s.status)}" data-held="${s.held}">` +
+    const s = zoneState(byId, z.id);
+    const label = ZONE_STATUS_TEXT[s.status] ?? zoneIdleText(s, 'held');
+    // One bar for the tug of war: purple for the monsters' share, red for the player's.
+    const bar = s.playerProgress > 0
+      ? `<span class="player" style="width:${Math.round(s.playerProgress * 100)}%"></span>`
+      : `<span style="width:${Math.round(s.progress * 100)}%"></span>`;
+    return `<div class="zone" data-status="${escapeHtml(s.status)}" data-held="${s.held}" data-player-held="${s.playerHeld}">` +
       `<span class="zone-name">${escapeHtml(z.name)}</span>` +
-      `<span class="zone-bar"><span style="width:${Math.round(s.progress * 100)}%"></span></span>` +
+      `<span class="zone-bar">${bar}</span>` +
       `<span class="zone-label">${label}</span></div>`;
   }).join('');
 }
@@ -647,6 +675,38 @@ function drawKills(map, toLngLat) {
   });
 }
 
+const supplyPlanes = []; // { x1, z1, x2, z2, at, seconds }
+
+function addSupplyPlaneLayers(map) {
+  map.addSource('supply-planes', { type: 'geojson', data: EMPTY });
+  map.addLayer({
+    id: 'supply-plane-route', type: 'line', source: 'supply-planes',
+    paint: {
+      'line-color': SUPPLY_PLANE_COLOR, 'line-width': 3, 'line-dasharray': [3, 2],
+      'line-opacity': ['*', 0.9, ['get', 'fade']],
+    },
+  });
+}
+
+/**
+ * The routes of recent supply planes, each fading out over the seconds the game gave. Only the line: the game
+ * never says where along it the crate fell, so nothing here may hint at a spot. Endpoints lie past the play area.
+ */
+function drawSupplyPlanes(map, toLngLat) {
+  const now = performance.now() / 1000;
+  for (let i = supplyPlanes.length - 1; i >= 0; i--) {
+    if (now - supplyPlanes[i].at > supplyPlanes[i].seconds) supplyPlanes.splice(i, 1);
+  }
+  map.getSource('supply-planes').setData({
+    type: 'FeatureCollection',
+    features: supplyPlanes.map((p) => ({
+      type: 'Feature',
+      properties: { fade: 1 - (now - p.at) / p.seconds },
+      geometry: { type: 'LineString', coordinates: [toLngLat(p.x1, p.z1), toLngLat(p.x2, p.z2)] },
+    })),
+  });
+}
+
 /** Energy cost and alive-at-once limit per monster type, from the game's welcome message. */
 const monsterCosts = {};
 const monsterLimits = {};
@@ -815,6 +875,7 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     updateMonsterCounts(monsters);
     updateSighting(msg);
     drawKills(map, toLngLat);
+    drawSupplyPlanes(map, toLngLat);
   };
 
   const open = () => {
@@ -862,6 +923,11 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         recentKills.push({ kind: 'monster', x: msg.x, z: msg.z, at: performance.now() / 1000, seconds: KILL_MARKER_SECONDS });
         drawKills(view.map, view.toLngLat);
         showToast(`Your ${msg.type} #${msg.id} was killed`, false);
+      } else if (msg.t === 'supplyPlane') {
+        const { x1, z1, x2, z2, show } = msg;
+        supplyPlanes.push({ x1, z1, x2, z2, at: performance.now() / 1000, seconds: show > 0 ? show : 30 });
+        drawSupplyPlanes(view.map, view.toLngLat);
+        showToast('Supply plane passed over — a crate is somewhere under the line', false);
       } else if (msg.t === 'playerKilled') {
         const now = performance.now() / 1000;
         playerRespawnAt = now + (msg.respawnIn ?? 0);

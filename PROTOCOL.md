@@ -82,7 +82,8 @@ must ignore `state` and events until it has finished handling `welcome`.
   "callRange": 100,
   "monsterTypes": [ { "type": "crawler", "cost": 1, "limit": 8, "orders": true },
                     { "type": "overlord", "cost": 3, "limit": 1, "orders": true },
-                    { "type": "bloodhound", "cost": 1, "limit": 6, "groupMoveTo": true } ],
+                    { "type": "bloodhound", "cost": 1, "limit": 6, "groupMoveTo": true },
+                    { "type": "stinger", "cost": 2, "limit": 4, "orders": true } ],
   "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50, "victoryMultiplier": 2 } ],
   "spawnZones": [ { "id": 1, "name": "North-west", "x": -250, "z": 250, "size": 100 },
                   { "id": 2, "name": "South-east", "x": 250, "z": -250, "size": 100 } ],
@@ -98,7 +99,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `sendRate` | `state` messages per second. |
 | `area` | The whole play area (about 285 KB), described below. |
 | `callRange` | Metres a monster's yell carries; used to draw the monster network. Optional. |
-| `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers and overlords take orders; later types may not. `groupMoveTo`: optional, on a type without `orders`; its monsters follow a **group `moveTo`** and nothing else (blood hounds). |
+| `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers, overlords and stingers take orders; other types may not. `groupMoveTo`: optional, on a type without `orders`; its monsters follow a **group `moveTo`** and nothing else (blood hounds). |
 | `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. `victoryMultiplier` (optional, default 1): how much holding this zone is worth compared with an ordinary zone; today the zone nearest the centre has 2. See [Victory](#victory). |
 | `spawnZones` | The places monsters are spawned into (two today): `id`, a short `name` for the popup, centre (`x`, `z`) and side length `size`, squares aligned to the grid. The game decides where they are. See [Spawning](#spawning). |
 | `game` | Optional. Number of this game in the session, starting at 1; goes up with every [New game](#new-game). |
@@ -181,7 +182,7 @@ there. That is deliberate.
 | Field | Notes |
 |---|---|
 | `id` | Unique for the session. |
-| `type` | `crawler`, `overlord` or `bloodhound` (see `welcome.monsterTypes`). |
+| `type` | `crawler`, `overlord`, `bloodhound` or `stinger` (see `welcome.monsterTypes`). |
 | `range`, `fov` | Sight distance (m) and view cone width (degrees, 360 = all round). |
 | `sees` | This monster can see the FPS player right now. |
 | `heard` | Optional. A recent gunshot: `bearing` from the monster towards it, `fade` 1 → 0 over a few seconds. Never the shooter's position. |
@@ -321,7 +322,7 @@ The map player can tell monsters where to go and when to hold still. Only monste
    then its own behaviour. A group order never replaces an individual one, so the map player can keep a sentry while
    moving the rest. Exception: a blood hound on the scent (`scent: true`) follows the trail ahead of overlords and the
    group order; only chasing a player it sees comes first.
-3. **`moveTo`.** Crawlers walk (navmesh), overlords fly to the point, then stay near it until the order changes. Group
+3. **`moveTo`.** Crawlers and stingers walk (navmesh), overlords fly to the point, then stay near it until the order changes. Group
    members gather around the point, spread a few metres apart rather than stacking. The game may move the point to
    the nearest reachable spot; `groupOrder` / `monsters[].order` carry the point actually used. A new `moveTo` with
    the same target simply replaces the point: the client sends one every ~200 ms while the map player **drags** the
@@ -370,6 +371,6 @@ on placing them.
 4. The new monster joins the current group order, if any (see [Orders](#orders)).
 
 Spawn refusal reasons: `Unknown monster type '…'`, `No such spawn zone`, `No free spot in that spawn zone`,
-`Crawler limit reached (8)`, `Overlord limit reached (1)`, `Bloodhound limit reached (6)`, `Monster limit reached (12)`, `Not enough energy`,
+`Crawler limit reached (8)`, `Overlord limit reached (1)`, `Bloodhound limit reached (6)`, `Stinger limit reached (4)`, `Monster limit reached (15)`, `Not enough energy`,
 `The map is still loading`, `The game is over`. The client shows them as-is; it should not depend on the exact
 wording.

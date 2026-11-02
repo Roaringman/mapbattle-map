@@ -83,10 +83,10 @@ must ignore `state` and events until it has finished handling `welcome`.
   "monsterTypes": [ { "type": "crawler", "cost": 1, "limit": 8, "orders": true },
                     { "type": "overlord", "cost": 3, "limit": 1, "orders": true },
                     { "type": "bloodhound", "cost": 1, "limit": 6, "groupMoveTo": true } ],
-  "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50 } ],
+  "zones": [ { "id": 1, "name": "Zone A", "x": 45.39, "z": -0.71, "size": 50, "victoryMultiplier": 2 } ],
   "spawnZones": [ { "id": 1, "name": "North-west", "x": -250, "z": 250, "size": 100 },
                   { "id": 2, "name": "South-east", "x": 250, "z": -250, "size": 100 } ],
-  "victory": { "target": 100, "secondsHoldingAll": 180, "slowdownPerMissingZone": 2 }
+  "victory": { "target": 100, "secondsHoldingAll": 180, "slowdownPerMissingZone": 2, "overlordKillPoints": 10 }
 }
 ```
 
@@ -99,10 +99,10 @@ must ignore `state` and events until it has finished handling `welcome`.
 | `area` | The whole play area (about 285 KB), described below. |
 | `callRange` | Metres a monster's yell carries; used to draw the monster network. Optional. |
 | `monsterTypes` | Spawnable types, their energy cost, and `limit`: how many of that type the map player may have alive at once. Optional; no `limit` means no per-type limit. `orders`: monsters of this type obey `order` messages (see [Orders](#orders)); absent or `false` means they don't. Crawlers and overlords take orders; later types may not. `groupMoveTo`: optional, on a type without `orders`; its monsters follow a **group `moveTo`** and nothing else (blood hounds). |
-| `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. |
+| `zones` | Control zones: centre (`x`, `z`) and side length `size`, squares aligned to the grid. `victoryMultiplier` (optional, default 1): how much holding this zone is worth compared with an ordinary zone; today the zone nearest the centre has 2. See [Victory](#victory). |
 | `spawnZones` | The places monsters are spawned into (two today): `id`, a short `name` for the popup, centre (`x`, `z`) and side length `size`, squares aligned to the grid. The game decides where they are. See [Spawning](#spawning). |
 | `game` | Optional. Number of this game in the session, starting at 1; goes up with every [New game](#new-game). |
-| `victory` | Optional. The win rule, for explaining it: first side to `target` victory points wins; holding every zone takes `secondsHoldingAll`, and each zone short of all multiplies that by `slowdownPerMissingZone`. See [Victory](#victory). |
+| `victory` | Optional. The win rule, for explaining it: first side to `target` victory points wins; holding every zone takes `secondsHoldingAll`, and each zone short of all multiplies that by `slowdownPerMissingZone`; killing an overlord gives the FPS player `overlordKillPoints`. See [Victory](#victory). |
 
 #### `area`
 
@@ -163,8 +163,9 @@ must ignore `state` and events until it has finished handling `welcome`.
 A zone is one tug of war: think of it as a single value from −1 (player-held) to +1 (monster-held), sent as
 `progress` = max(0, value) and `playerProgress` = max(0, −value). Whoever is alone inside first drains the other
 side's hold, then builds their own. The player alone takes 10 s per half (monster-held → neutral → player-held).
-Each zone the player holds earns them supply points for ammo drops (see `supplyPlane`); the points themselves are
-never sent.
+Each zone the player holds earns them supply points for supply drops of ammo or health packs (see `supplyPlane`);
+the points themselves are never sent. The FPS player's health does not regenerate: a health-pack drop is the only
+way to heal, so holding zones matters to them for survival as well as ammo.
 
 `reclaiming` and `contested` reveal that the FPS player is in that zone. `playerHeld` reveals that they have been
 there. That is deliberate.
@@ -209,7 +210,8 @@ there. That is deliberate.
 { "t": "supplyPlane", "x1": 290.43, "z1": 360, "x2": -291.87, "z2": -360, "show": 45, "incoming": true }
 ```
 
-The FPS player spent supply points on an ammo drop. A plane flies a straight line across the whole map, from beyond
+The FPS player spent supply points on a supply drop: ammo or a health pack. The map is **not told which**; both look
+the same here. A plane flies a straight line across the whole map, from beyond
 one edge to beyond the other (the endpoints are outside the play area; clip or let MapLibre draw past the edge),
 and drops a crate on a parachute **somewhere below that line**.
 
@@ -238,11 +240,16 @@ Both sides race to `target` (100) victory points. A side earns points only for t
 (`zones[].held` for the monsters, `zones[].playerHeld` for the FPS player); capturing in progress earns nothing.
 The rate depends on how many zones that side holds, out of N zones in total:
 
-    rate = target / (secondsHoldingAll × slowdownPerMissingZone^(N − held))
+    rate = target / (secondsHoldingAll × slowdownPerMissingZone^(N − held) × product of victoryMultiplier over the zones NOT held)
 
-With the current 3 zones: all 3 held wins in **3 min**, 2 in **6 min**, 1 in **12 min**, none earns nothing.
+Without multipliers, with the current 3 zones: all 3 held wins in **3 min**, 2 in **6 min**, 1 in **12 min**, none
+earns nothing. The centre zone (Zone A, `victoryMultiplier` 2) makes that: all 3 **3 min**; centre + 1 **6 min**; the
+other 2 **12 min**; centre alone **12 min**; one other alone **24 min**.
 Points are kept when a zone is lost, so a lead built early still counts. The rates in `state.victory` already follow
 this formula; the client should show them rather than compute its own.
+
+Killing an overlord also gives the FPS player `overlordKillPoints` (10) at once. It shows up as a jump in
+`state.victory.player`, together with the `killed` event for that overlord; it can end the game.
 
 When a side reaches the target the game is over: the world freezes, `gameOver` is sent once, and every later `state`
 carries `victory.winner`, so a page that joins or reloads afterwards still knows. A tie in the same frame is a

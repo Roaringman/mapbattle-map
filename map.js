@@ -302,6 +302,7 @@ function clearLiveLayers() {
   if (!view?.map.getSource('player')) return;
   for (const source of LIVE_SOURCES) view.map.getSource(source).setData(EMPTY);
   document.getElementById('zones').innerHTML = '';
+  showZoneBadges(view.map, [], view.toLngLat);
   updateMonsterCounts([]);
   updateVictory(null);
   closeSpawnPopup();
@@ -771,7 +772,8 @@ function addZoneLayers(map) {
       'line-color': ['match', ['get', 'status'],
         'contested', '#ffb347', 'reclaiming', '#ff5a4f', 'capturing', ZONE_MONSTER,
         ['case', ['get', 'held'], ZONE_MONSTER, ['get', 'playerHeld'], ZONE_PLAYER, ZONE_NEUTRAL]],
-      'line-width': 2.5,
+      // Zones worth more victory points (welcome.zones[].victoryMultiplier) get a heavier border.
+      'line-width': ['case', ['>', ['get', 'victoryMultiplier'], 1], 5, 2.5],
     },
   }, 'buildings-fill');
 
@@ -804,7 +806,7 @@ function zoneFeatures(defs, states, toLngLat) {
         type: 'Feature',
         properties: {
           id: z.id, name: z.name, progress: s.progress, held: s.held, status: s.status, monsters: s.monsters,
-          playerProgress: s.playerProgress, playerHeld: s.playerHeld,
+          playerProgress: s.playerProgress, playerHeld: s.playerHeld, victoryMultiplier: victoryMultiplier(z),
         },
         geometry: { type: 'Polygon', coordinates: [squareRing(z, toLngLat)] },
       };
@@ -824,6 +826,32 @@ function zoneState(byId, id) {
   return { ...s, playerProgress: s.playerProgress ?? 0, playerHeld: s.playerHeld === true, monsters: s.monsters ?? 0 };
 }
 
+/** How much holding a zone counts towards victory points; 1 when the game doesn't say. */
+function victoryMultiplier(zone) {
+  const m = Number(zone.victoryMultiplier);
+  return Number.isFinite(m) && m > 0 ? m : 1;
+}
+
+/** "×2" for a zone worth more than an ordinary one, otherwise empty. */
+function multiplierText(m) {
+  return m > 1 ? `×${m}` : '';
+}
+
+/** Badges on the map for zones worth more victory points, hung off each zone's north edge. */
+let zoneBadges = [];
+
+function showZoneBadges(map, defs, toLngLat) {
+  for (const badge of zoneBadges) badge.remove();
+  zoneBadges = defs.filter((z) => victoryMultiplier(z) > 1).map((z) => {
+    const el = document.createElement('div');
+    el.className = 'zone-badge';
+    el.textContent = `${multiplierText(victoryMultiplier(z))} points`;
+    el.title = 'Holding this zone counts for more victory points';
+    return new maplibregl.Marker({ element: el, anchor: 'bottom', offset: [0, -4] })
+      .setLngLat(toLngLat(z.x, z.z + z.size / 2)).addTo(map);
+  });
+}
+
 /** Idle zones are described by who holds them. */
 function zoneIdleText(s, monsterHeldText) {
   return s.held ? monsterHeldText : s.playerHeld ? 'held by the player' : 'neutral';
@@ -836,8 +864,11 @@ function zonePopupHtml(p) {
     ? `${Math.round(p.playerProgress * 100)}% the player's`
     : `${Math.round(p.progress * 100)}% yours`;
   const inside = p.monsters ? ` · ${p.monsters} monster${p.monsters === 1 ? '' : 's'} inside` : '';
+  const worth = p.victoryMultiplier > 1
+    ? `<span class="zone-worth">Worth ${p.victoryMultiplier}× an ordinary zone in victory points.</span><br>`
+    : '';
   return `<b>${escapeHtml(p.name)}</b> <span class="dim">control zone</span><br>` +
-    `${status[0].toUpperCase()}${status.slice(1)} · ${share}${inside}<br>` +
+    `${status[0].toUpperCase()}${status.slice(1)} · ${share}${inside}<br>` + worth +
     '<span class="dim">Keep monsters inside to capture it; held zones raise your energy gain. ' +
     'The player captures it by standing in it alone, and each zone they hold earns them supply drops.</span>';
 }
@@ -852,12 +883,13 @@ function updateZonePanel(defs, states) {
   list.innerHTML = defs.map((z) => {
     const s = zoneState(byId, z.id);
     const label = ZONE_STATUS_TEXT[s.status] ?? zoneIdleText(s, 'held');
+    const mult = multiplierText(victoryMultiplier(z));
     // One bar for the tug of war: purple for the monsters' share, red for the player's.
     const bar = s.playerProgress > 0
       ? `<span class="player" style="width:${Math.round(s.playerProgress * 100)}%"></span>`
       : `<span style="width:${Math.round(s.progress * 100)}%"></span>`;
     return `<div class="zone" data-status="${escapeHtml(s.status)}" data-held="${s.held}" data-player-held="${s.playerHeld}">` +
-      `<span class="zone-name">${escapeHtml(z.name)}</span>` +
+      `<span class="zone-name">${escapeHtml(z.name)}${mult ? ` <span class="zone-mult">${mult}</span>` : ''}</span>` +
       `<span class="zone-bar">${bar}</span>` +
       `<span class="zone-label">${label}</span></div>`;
   }).join('');
@@ -1383,6 +1415,7 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     updateMonsterCounts([]);
     document.getElementById('order-who').textContent = [...orderTypes].map((t) => `${t}s`).join(' & ');
     view.map.getSource('zones').setData(zoneFeatures(zoneDefs, [], view.toLngLat));
+    showZoneBadges(view.map, zoneDefs, view.toLngLat);
     view.map.getSource('spawn-zone').setData(spawnZoneFeatures(spawnZones, view.toLngLat));
     updateZonePanel(zoneDefs, []);
     ready = true;

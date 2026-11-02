@@ -199,7 +199,12 @@ there. That is deliberate.
 | `playerKilled` | `by`, `byType`, `x`, `z`, `respawnIn`, `deaths` | The FPS player died. `by`/`byType` is the monster that dealt the last hit and (`x`, `z`) where it saw them fall; all four are absent if no monster gets the credit. The player is out of the game (nothing can see them) for `respawnIn` seconds, then respawns at a random spot along the map edge, at least 100 m from every spawn zone. Where is never sent. `deaths` is the new total. |
 | `yell` | `id`, `from`, `wave`, `x`, `z`, `range` | Monster `id` yelled at (`x`, `z`), heard within `range` m. `from` is the monster it was answering, or -1 if it started the alarm. Yells in one alarm share a `wave`. |
 | `onTrail` | `id`, `onTrail` | Blood hound `id` picked up the FPS player's scent trail (`onTrail: true`) or lost it (`false`: the trail faded or went cold where the player died). Use it to switch the hound's symbol; `state.monsters[].scent` carries the same, for pages that join later. No "lost" event when a hound dies on the trail (`killed` says enough). The trail itself is never sent. |
-| `supplyPlane` | `x1`, `z1`, `x2`, `z2`, `show`, `incoming` | A supply plane is flying (`incoming: true`, sent as it appears) or flew (older games, sent after it left) straight from (`x1`, `z1`) to (`x2`, `z2`). See below. |
+| `supplyPlane` | `id`, `x1`, `z1`, `x2`, `z2`, `show`, `incoming` | A supply plane is flying (`incoming: true`, sent as it appears) or flew (older games, sent after it left) straight from (`x1`, `z1`) to (`x2`, `z2`). `id` names it in the plane events below (absent from older games). See below. |
+| `planeEnter` | `id` | Supply plane `id` has just flown into the play area: the [shoot-down minigame](#shooting-down-the-supply-plane) can start. Once per plane. |
+| `planeLeave` | `id`, `shotDown` | Supply plane `id` is no longer over the play area: it flew out (`shotDown: false`) or was shot down over it (`true`). End the minigame; hits are refused from now on. Once per plane, after its `planeEnter`. |
+| `rocketLaunched` | `id`, `impactIn` | A map player's hit on plane `id` was accepted: a rocket strikes it in `impactIn` seconds (2), wherever it is by then. Sent to everyone; the minigame is over for all pages. |
+| `planeShotDown` | `id`, `grounded` | The rocket struck plane `id`. No supply plane can fly for `grounded` seconds (45). Whether its crate had already dropped is not said. |
+| `planeHitResult` | `ok`, `id`, `reason` | Sent **only when a `planeHit` is refused** (`ok: false`); an accepted one is broadcast as `rocketLaunched`. |
 | `gameOver` | `winner`, `player`, `monsters` | A side reached the victory target. `winner` is `player` (the FPS player), `monsters` (the map side) or `draw`; `player`/`monsters` are the final scores. Sent once; see [Victory](#victory). |
 | `newGame` | `game` | The host started a new game in the same session. Clear the old match; a fresh `welcome` follows. See [New game](#new-game). |
 | `orderResult` | `ok`, `target`, `kind`, `reason` | Sent **only when an `order` is refused** (`ok: false`); accepted orders show up in the next `state`. `target` and `kind` echo the order. See [Orders](#orders). |
@@ -208,7 +213,7 @@ there. That is deliberate.
 #### `supplyPlane`
 
 ```json
-{ "t": "supplyPlane", "x1": 290.43, "z1": 360, "x2": -291.87, "z2": -360, "show": 45, "incoming": true }
+{ "t": "supplyPlane", "id": 3, "x1": 290.43, "z1": 360, "x2": -291.87, "z2": -360, "show": 45, "incoming": true }
 ```
 
 The FPS player spent supply points on a supply drop: ammo or a health pack. The map is **not told which**; both look
@@ -225,11 +230,38 @@ both.
 - **Draw it as a trace of the route** as soon as it arrives: a line (e.g. dashed) that fades out over `show`
   seconds, then remove it. Several can be on screen at once.
 - **The plane's position along the line is not sent**, nor when the crate drops: either would narrow down the drop
-  point.
+  point. (`planeEnter`/`planeLeave` mark when it crosses the play-area edge, for the minigame; the client could
+  work out roughly as much from the line and `show` anyway.)
 - **The crate's position is never sent**, not in this message and not later. The client must not suggest an exact
   spot; the line is all the map player knows. The drop is always within about 45 m of where the FPS player called
   it, which is the hint: send monsters to sweep along the line.
 - The FPS player picks the crate up by walking to it; nothing is sent when that happens.
+
+#### Shooting down the supply plane
+
+```json
+{ "t": "planeEnter", "id": 3 }
+{ "t": "planeHit", "id": 3 }                       // client → game: the minigame scored a hit
+{ "t": "rocketLaunched", "id": 3, "impactIn": 2 }
+{ "t": "planeShotDown", "id": 3, "grounded": 45 }
+{ "t": "planeLeave", "id": 3, "shotDown": true }
+```
+
+While a supply plane is over the play area (between its `planeEnter` and `planeLeave`), the map player can try to
+shoot it down in a minigame of the client's own design. When the player hits it, send `planeHit` with the plane's
+`id`. The game can't check the minigame, only the timing, so a hit is accepted when:
+
+- `id` is the plane in the air now (`No such plane` otherwise: a wrong id, or the plane is gone);
+- it has entered the play area (`The plane is not over the map yet`) and not left it (`The plane has left the map`);
+- it isn't already hit (`The plane is already hit`: the first hit from any map player wins);
+- the game isn't over (`The game is over`). `planeHit` shares the order rate limit (`Too many orders`).
+
+An accepted hit is broadcast as `rocketLaunched`: a rocket rises from the monster spawn zone nearest the plane and
+strikes it `impactIn` (2) seconds later, wherever it is by then (a plane that flies out of the play area meanwhile
+is still hit; its `planeLeave` with `shotDown: false` comes first in that case). A crate that already dropped keeps
+falling; one still aboard is lost, and so are the FPS player's supply points spent on it. Then `planeShotDown`
+arrives and supply drops are grounded for `grounded` (45) seconds: the FPS player can't call a plane until then.
+A refused hit gets `planeHitResult` with `ok: false` and the reason; don't parse the text.
 
 #### Victory
 
@@ -288,6 +320,7 @@ Pressing Play again in the editor is still a whole new session: new password, ne
 |---|---|---|
 | `spawn` | `type`, `zone` | Ask for a monster of `type` in spawn zone `zone` (an id from `welcome.spawnZones`). The game picks the spot, checks every rule and replies with `spawnResult`. See [Spawning](#spawning). |
 | `order` | `target`, `kind`, `x`, `z` | Give monsters an order. See [Orders](#orders). The game replies only on refusal (`orderResult`). |
+| `planeHit` | `id` | The shoot-down minigame hit supply plane `id`. Accepted: everyone gets `rocketLaunched`; refused: the sender gets `planeHitResult`. See [Shooting down the supply plane](#shooting-down-the-supply-plane). |
 | `ping` | | Connection check; the game replies `pong`. |
 
 Messages over 64 KB close the connection.

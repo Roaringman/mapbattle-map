@@ -374,8 +374,8 @@ function wireMapClicks(map) {
 // ---------------------------------------------------------------------------------------------------------------
 
 const SPAWN_TYPE_INFO = {
-  overlord: 'Flies, sees 60 m all around, directs crawlers within 100 m to the player.',
-  stinger: 'Gunner: sees 160 m in a cone, shoots up to 150 m. Most accurate around 40 m, poor up close and far off; backs away from a close player.',
+  overlord: 'Flies, sees 60 m all around, directs ground monsters within 100 m to the player.',
+  stinger: 'Gunner: sees 160 m in a cone, shoots up to 150 m. Most accurate around 40 m, poor up close and far off; backs away from a close player. Calls monsters within 100 m to the player it sees.',
 };
 let spawnTypes = []; // monster types in the order the game listed them
 let spawnZones = []; // from welcome.spawnZones
@@ -939,7 +939,7 @@ function addMonsterLayers(map) {
   map.addLayer({
     id: 'command-link', type: 'line', source: 'commands',
     layout: { 'line-cap': 'round' },
-    paint: { 'line-color': OVERLORD_COLOR, 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [1, 1.5] },
+    paint: { 'line-color': ['case', ['==', ['get', 'from'], 'stinger'], STINGER_COLOR, OVERLORD_COLOR], 'line-width': 2, 'line-opacity': 0.85, 'line-dasharray': [1, 1.5] },
   });
 
   // Orders: a dashed line to each monster's move-to point (gold for the group, white for its own order).
@@ -1016,7 +1016,7 @@ function startScentAnimation(map) {
   if (!scentAnimating && latestMonsters.some((m) => m.scent)) animateScent(map);
 }
 
-/** Lines from each overlord to the crawlers it is currently directing. */
+/** Lines from each overlord or stinger to the monsters it is currently sending to the player. */
 function commandFeatures(monsters, toLngLat) {
   const byId = new Map(monsters.map((m) => [m.id, m]));
   const features = [];
@@ -1025,7 +1025,7 @@ function commandFeatures(monsters, toLngLat) {
       const m = byId.get(id);
       if (!m) continue;
       features.push({
-        type: 'Feature', properties: {},
+        type: 'Feature', properties: { from: overlord.type },
         geometry: { type: 'LineString', coordinates: [toLngLat(overlord.x, overlord.z), toLngLat(m.x, m.z)] },
       });
     }

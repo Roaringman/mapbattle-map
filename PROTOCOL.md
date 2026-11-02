@@ -187,7 +187,7 @@ there. That is deliberate.
 | `sees` | This monster can see the FPS player right now. |
 | `heard` | Optional. A recent gunshot: `bearing` from the monster towards it, `fade` 1 → 0 over a few seconds. Never the shooter's position. |
 | `scent` | Optional, blood hounds only. `true` while the hound follows the FPS player's scent trail. The trail itself is never sent. |
-| `directing` | Optional, overlords only. Ids of crawlers it is currently sending towards the player. |
+| `directing` | Optional, overlords and stingers. Ids of monsters it is currently sending towards the player (it sees the player, so this reveals nothing more). |
 | `order` | Optional. The order this monster is following: `kind` `moveTo` or `stay`; `x`, `z` the point it is going to or holding (for a group `stay`, the spot this monster holds); `from` `individual` (given to this monster) or `group` (it is following `groupOrder`). Absent when the monster acts on its own. See [Orders](#orders). |
 
 ### Events
@@ -318,7 +318,7 @@ The map player can tell monsters where to go and when to hold still. Only monste
 1. **Who obeys.** Monsters of types with `orders: true`. A group order skips the others; an individual order to one of
    them is refused (`That monster doesn't take orders`). Types with `groupMoveTo: true` (blood hounds) also follow a
    group `moveTo`; a group `stay` cancels their share of it, and individual orders to them are refused.
-2. **Priority, per monster:** its individual order, then an overlord directing it (`directing`), then the group order,
+2. **Priority, per monster:** its individual order, then an overlord or stinger directing it (`directing`), then the group order,
    then its own behaviour. A group order never replaces an individual one, so the map player can keep a sentry while
    moving the rest. Exception: a blood hound on the scent (`scent: true`) follows the trail ahead of overlords and the
    group order; only chasing a player it sees comes first.

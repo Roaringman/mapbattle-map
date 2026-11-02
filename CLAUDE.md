@@ -18,7 +18,7 @@ Never read or reference files from the Unity project; if the client needs data, 
 | `PROTOCOL.md` | Message format, shared with the game. |
 | `serve.mjs` | Local dev server only (Pages serves the same files). |
 
-Libraries: MapLibre GL JS 4.7.1 from unpkg, pinned. No npm, no bundler; keep it that way unless there's a real need.
+Libraries: MapLibre GL JS 4.7.1 and Turf 7.1.0 (route/play-area crossings for the plane minigame) from unpkg, pinned. No npm, no bundler; keep it that way unless there's a real need.
 
 ## Running
 
@@ -40,7 +40,11 @@ Libraries: MapLibre GL JS 4.7.1 from unpkg, pinned. No npm, no bundler; keep it 
    Which types obey comes from `welcome.monsterTypes[].orders`, never from a list in the page. Press, hold still
    ~0.3 s, then drag draws a selection box (a drag that starts straight away still pans); the selection gets one
    order with `target` as a list of ids, and monsters sharing a move-to point share one pin.
-6. If the connection drops after joining, reconnect with the same password. "Wrong password." on a reconnect means the
+6. Supply-plane shoot-down: on `planeEnter` a console opens on the right (bottom sheet on phones). Turf finds where
+   the plane's route leaves the play-area square; a popup there shows that point as WGS84 with 3 decimals, and the
+   map player clicks those 10 digits on the console's keypad (pointer only, no typing). A correct entry sends
+   `planeHit`; the game answers with `rocketLaunched`/`planeShotDown` or `planeHitResult`, and `planeLeave` ends it.
+7. If the connection drops after joining, reconnect with the same password. "Wrong password." on a reconnect means the
    host restarted: back to the join screen with that explanation.
 
 ## Rules of thumb

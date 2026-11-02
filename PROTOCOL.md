@@ -76,7 +76,7 @@ must ignore `state` and events until it has finished handling `welcome`.
 
 ```json
 {
-  "t": "welcome", "protocolVersion": 1, "map": "PlayArea01",
+  "t": "welcome", "protocolVersion": 2, "map": "PlayArea01",
   "originEasting": 680680.32, "originNorthing": 6156136.38, "sendRate": 10,
   "area": { ... },
   "callRange": 100,
@@ -328,7 +328,7 @@ Messages over 64 KB close the connection.
 ### Orders
 
 The map player can tell monsters where to go and when to hold still. Only monsters whose type has `orders: true` in
-`welcome.monsterTypes` obey (crawlers and overlords today). Orders cost no energy.
+`welcome.monsterTypes` obey (crawlers, overlords and stingers today). Orders cost no energy.
 
 ```json
 { "t": "order", "target": "all", "kind": "moveTo", "x": -120.5, "z": 80.25 }

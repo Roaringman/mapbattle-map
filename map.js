@@ -123,6 +123,7 @@ function main() {
   const button = document.getElementById('join-button');
 
   wirePanelToggle();
+  wirePlaneKeypad();
   serverInput.value = DEFAULT_SERVER;
   nameInput.value = loadName();
   (nameInput.value ? passwordInput : nameInput).focus();
@@ -299,6 +300,7 @@ function clearLiveLayers() {
   recentKills.length = 0;
   activeYells.length = 0;
   supplyPlanes.length = 0;
+  closePlaneGame();
   playerRespawnAt = 0;
   if (!view?.map.getSource('player')) return;
   for (const source of LIVE_SOURCES) view.map.getSource(source).setData(EMPTY);
@@ -420,12 +422,22 @@ function openSpawnPopup(map, zone) {
     grid.append(button);
     buttons.set(type, { button, small });
   }
+  // Written out rather than only as button tooltips, which phones never show.
+  const info = document.createElement('div');
+  info.className = 'spawn-info dim';
+  for (const type of spawnTypes.filter((t) => SPAWN_TYPE_INFO[t])) {
+    const line = document.createElement('div');
+    const label = document.createElement('b');
+    label.textContent = capitalise(type);
+    line.append(label, ` ${SPAWN_TYPE_INFO[type]}`);
+    info.append(line);
+  }
   const note = document.createElement('div');
   note.className = 'dim';
   note.textContent = 'Each one appears at a random spot inside the zone.';
   const result = document.createElement('div');
   result.className = 'spawn-result';
-  el.append(title, grid, note, result);
+  el.append(title, grid, ...(info.childElementCount ? [info] : []), note, result);
 
   // Hang the popup off the zone's inner corner, opening towards the middle of the map, so the zone itself stays
   // visible and the new monsters can be seen arriving.
@@ -901,17 +913,15 @@ function updateZonePanel(defs, states) {
 
 function addMonsterLayers(map) {
   map.addSource('cones', { type: 'geojson', data: EMPTY });
+  const coneColor = ['case', ['get', 'sees'], '#ffb347', ['==', ['get', 'type'], 'overlord'], OVERLORD_COLOR,
+    ['==', ['get', 'type'], 'bloodhound'], HOUND_COLOR, ['==', ['get', 'type'], 'stinger'], STINGER_COLOR, '#a77bff'];
   map.addLayer({
     id: 'cone-fill', type: 'fill', source: 'cones',
-    paint: {
-      'fill-color': ['case', ['get', 'sees'], '#ffb347', ['==', ['get', 'type'], 'overlord'], OVERLORD_COLOR,
-        ['==', ['get', 'type'], 'bloodhound'], HOUND_COLOR, ['==', ['get', 'type'], 'stinger'], STINGER_COLOR, '#a77bff'],
-      'fill-opacity': ['case', ['get', 'sees'], 0.22, 0.08],
-    },
+    paint: { 'fill-color': coneColor, 'fill-opacity': ['case', ['get', 'sees'], 0.22, 0.08] },
   });
   map.addLayer({
     id: 'cone-edge', type: 'line', source: 'cones',
-    paint: { 'line-color': ['case', ['get', 'sees'], '#ffb347', '#a77bff'], 'line-opacity': 0.35, 'line-width': 1 },
+    paint: { 'line-color': coneColor, 'line-opacity': 0.35, 'line-width': 1 },
   });
 
   map.addSource('heard', { type: 'geojson', data: EMPTY });
@@ -1253,7 +1263,7 @@ function drawKills(map, toLngLat) {
   });
 }
 
-const supplyPlanes = []; // { x1, z1, x2, z2, at, seconds }
+const supplyPlanes = []; // { id, x1, z1, x2, z2, at, seconds }
 
 function addSupplyPlaneLayers(map) {
   map.addSource('supply-planes', { type: 'geojson', data: EMPTY });
@@ -1283,6 +1293,221 @@ function drawSupplyPlanes(map, toLngLat) {
       geometry: { type: 'LineString', coordinates: [toLngLat(p.x1, p.z1), toLngLat(p.x2, p.z2)] },
     })),
   });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Shooting down the supply plane: while it is over the play area, punch in the WGS84 coordinates of the point where
+// its route leaves the area (shown in a popup there) on the console's keypad. A correct entry sends planeHit; the
+// game decides whether it counts (rocketLaunched or planeHitResult).
+// ---------------------------------------------------------------------------------------------------------------
+
+const PLANE_GAME_LINGER_MS = 3000; // how long the console stays up after the plane is down or gone
+let planeGame = null; // { id, target, digits, entered, state, deadline, popup, marker, closeTimer, frame }
+
+/**
+ * Where a supply plane's route crosses the play-area square, as [lng, lat]: `entry` nearer the route's start, `exit`
+ * farther along. Null when the route misses the area.
+ */
+function routeCrossings(plane, toLngLat) {
+  const start = toLngLat(plane.x1, plane.z1);
+  const route = turf.lineString([start, toLngLat(plane.x2, plane.z2)]);
+  const points = turf.lineIntersect(route, areaGeoJson(view.area, toLngLat)).features.map((f) => f.geometry.coordinates);
+  if (!points.length) return null;
+  points.sort((a, b) => turf.distance(start, a) - turf.distance(start, b));
+  return { start, entry: points.length > 1 ? points[0] : null, exit: points.at(-1) };
+}
+
+/** "55.518° N, 11.862° E": three decimals, so the keypad needs ten digits here. */
+function wgsText([lng, lat]) {
+  return `${Math.abs(lat).toFixed(3)}° ${lat < 0 ? 'S' : 'N'}, ${Math.abs(lng).toFixed(3)}° ${lng < 0 ? 'W' : 'E'}`;
+}
+
+function openPlaneGame(id) {
+  const plane = supplyPlanes.find((p) => p.id === id);
+  const crossings = plane && routeCrossings(plane, view.toLngLat);
+  if (!crossings) return false; // joined after the route was sent, or a route that misses the map
+  closePlaneGame();
+
+  // Countdown estimate only: the plane flew from its start to the entry point since `supplyPlane`, at a steady speed.
+  // planeLeave is what actually ends the game.
+  let deadline = null;
+  if (crossings.entry) {
+    const flown = turf.distance(crossings.start, crossings.entry, { units: 'meters' });
+    const seconds = performance.now() / 1000 - plane.at;
+    const left = turf.distance(crossings.entry, crossings.exit, { units: 'meters' }) / (flown / seconds);
+    if (Number.isFinite(left) && left > 0) deadline = { from: performance.now(), ms: left * 1000 };
+  }
+
+  const target = wgsText(crossings.exit);
+  const mark = document.createElement('div');
+  mark.className = 'aa-mark';
+  const marker = new maplibregl.Marker({ element: mark }).setLngLat(crossings.exit).addTo(view.map);
+  // Open the popup towards the middle of the map: the exit point is on the edge.
+  const { x, z } = view.toLocal(...crossings.exit);
+  const anchor = Math.abs(x) > Math.abs(z) ? (x > 0 ? 'right' : 'left') : (z > 0 ? 'top' : 'bottom');
+  const label = document.createElement('div');
+  label.innerHTML = '<div class="aa-pop-title">Plane exits here</div>';
+  label.append(Object.assign(document.createElement('div'), { className: 'aa-pop-coords', textContent: target }));
+  const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, anchor, offset: 14, className: 'aa-pop' })
+    .setLngLat(crossings.exit).setDOMContent(label).addTo(view.map);
+
+  planeGame = {
+    id, target, digits: [...target].filter((c) => c >= '0' && c <= '9'), entered: [], state: 'entry', deadline,
+    popup, marker, closeTimer: 0, frame: 0,
+  };
+  document.getElementById('aa-plane').textContent = `#${id}`;
+  setPlaneStatus('Key in the exit coordinates before the plane gets there.');
+  document.getElementById('aa').hidden = false;
+  renderPlaneReadout();
+  tickPlaneTimer();
+  revealPlaneExit(crossings.exit);
+  return true;
+}
+
+/** Pans the map only if the exit point is off screen or under the console or the panel (on phones, usually). */
+function revealPlaneExit(lngLat) {
+  const map = view.map;
+  const { width, height } = map.getContainer().getBoundingClientRect();
+  const p = map.project(lngLat);
+  const aa = document.getElementById('aa').getBoundingClientRect();
+  const panel = document.querySelector('.panel').getBoundingClientRect();
+  const under = (r) => p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
+  if (p.x > 0 && p.y > 0 && p.x < width && p.y < height && !under(aa) && !under(panel)) return;
+  // Into the middle of the uncovered part. (easeTo's padding would stick to the map for later moves.)
+  const sheet = aa.left < 40; // the phone layout: a sheet along the bottom
+  const to = sheet ? [width / 2, (panel.bottom + aa.top) / 2] : [(panel.right + aa.left) / 2, height / 2];
+  map.panBy([p.x - to[0], p.y - to[1]], { duration: 600 });
+}
+
+function closePlaneGame() {
+  if (!planeGame) return;
+  clearTimeout(planeGame.closeTimer);
+  cancelAnimationFrame(planeGame.frame);
+  planeGame.popup.remove();
+  planeGame.marker.remove();
+  planeGame = null;
+  document.getElementById('aa').hidden = true;
+}
+
+/** Closes the console after a moment, so the outcome can be read. */
+function lingerPlaneGame() {
+  clearTimeout(planeGame.closeTimer);
+  planeGame.closeTimer = setTimeout(closePlaneGame, PLANE_GAME_LINGER_MS);
+}
+
+function setPlaneStatus(text, tone = '') {
+  const status = document.getElementById('aa-status');
+  status.textContent = text;
+  status.dataset.tone = tone;
+  document.getElementById('aa').dataset.state = planeGame?.state ?? '';
+}
+
+/** The target's characters with each digit as a slot: dots, degrees and the comma are filled in already. */
+function renderPlaneReadout() {
+  const readout = document.getElementById('aa-readout');
+  readout.replaceChildren();
+  let slot = 0;
+  for (const c of planeGame.target) {
+    const span = document.createElement('span');
+    if (c >= '0' && c <= '9') {
+      span.className = 'aa-slot';
+      if (slot < planeGame.entered.length) span.textContent = planeGame.entered[slot];
+      else if (slot === planeGame.entered.length && planeGame.state === 'entry') span.classList.add('cur');
+      slot++;
+    } else {
+      span.textContent = c;
+    }
+    readout.append(span);
+  }
+}
+
+function tickPlaneTimer() {
+  const fill = document.getElementById('aa-time-fill');
+  const text = document.getElementById('aa-time-text');
+  if (!planeGame.deadline) {
+    fill.style.width = '100%';
+    text.textContent = 'Until it leaves the map';
+    return;
+  }
+  const left = Math.max(0, planeGame.deadline.ms - (performance.now() - planeGame.deadline.from));
+  fill.style.width = `${(100 * left) / planeGame.deadline.ms}%`;
+  text.textContent = left > 0 ? `≈ ${(left / 1000).toFixed(1)} s to the edge` : 'Any moment now';
+  if (left > 0 && ['entry', 'miss', 'firing'].includes(planeGame.state)) planeGame.frame = requestAnimationFrame(tickPlaneTimer);
+}
+
+function pressPlaneKey(key) {
+  if (planeGame?.state !== 'entry') return;
+  const { entered, digits } = planeGame;
+  if (key === 'clear') entered.length = 0;
+  else if (key === 'back') entered.pop();
+  else if (entered.length < digits.length) entered.push(key);
+  renderPlaneReadout();
+  if (entered.length < digits.length) return;
+
+  if (entered.join('') === digits.join('')) {
+    planeGame.state = 'firing';
+    setPlaneStatus('Locked on. Firing…', 'ok');
+    sendToGame({ t: 'planeHit', id: planeGame.id });
+  } else {
+    planeGame.state = 'miss';
+    setPlaneStatus('Miss: those are not the exit coordinates.', 'bad');
+    setTimeout(() => {
+      if (planeGame?.state !== 'miss') return;
+      planeGame.state = 'entry';
+      entered.length = 0;
+      renderPlaneReadout();
+      setPlaneStatus('Try again.');
+    }, 700);
+  }
+}
+
+function wirePlaneKeypad() {
+  // Pointer only, on purpose: the minigame is pressing the keys with the mouse (or a finger), not typing.
+  document.getElementById('aa-keys').addEventListener('pointerdown', (e) => {
+    const key = e.target.closest('button[data-key]');
+    if (!key || e.button !== 0) return;
+    e.preventDefault();
+    pressPlaneKey(key.dataset.key);
+  });
+}
+
+/** planeEnter, planeLeave, rocketLaunched, planeShotDown and planeHitResult. */
+function handlePlaneEvent(msg) {
+  const game = planeGame?.id === msg.id ? planeGame : null;
+  if (msg.t === 'planeEnter') {
+    if (!openPlaneGame(msg.id)) showToast('Supply plane over the map', false);
+  } else if (msg.t === 'rocketLaunched') {
+    showToast('Rocket away! It strikes the supply plane in a moment', true);
+    if (!game) return;
+    cancelAnimationFrame(game.frame);
+    game.state = 'launched';
+    renderPlaneReadout();
+    setPlaneStatus(`Rocket away. Impact in ${msg.impactIn ?? 2} s…`, 'ok');
+  } else if (msg.t === 'planeShotDown') {
+    showToast(`Supply plane shot down! No supply drops for ${Math.round(msg.grounded ?? 45)} s`, true);
+    if (!game) return;
+    game.state = 'down';
+    setPlaneStatus(`Target down. Supply drops grounded for ${Math.round(msg.grounded ?? 45)} s.`, 'ok');
+    lingerPlaneGame();
+  } else if (msg.t === 'planeLeave') {
+    if (!game) return;
+    if (msg.shotDown) {
+      lingerPlaneGame(); // planeShotDown says the rest
+    } else if (game.state !== 'launched') {
+      cancelAnimationFrame(game.frame);
+      game.state = 'gone';
+      renderPlaneReadout();
+      setPlaneStatus('The plane got away.', 'bad');
+      lingerPlaneGame();
+    }
+    // A plane already hit that flies out first is still struck: wait for planeShotDown.
+  } else if (msg.t === 'planeHitResult' && !msg.ok) {
+    if (!game) return;
+    game.state = 'entry';
+    game.entered.length = 0;
+    renderPlaneReadout();
+    setPlaneStatus(`Refused: ${msg.reason}`, 'bad');
+  }
 }
 
 /** Energy cost and alive-at-once limit per monster type, from the game's welcome message. */
@@ -1418,7 +1643,9 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     closeSpawnPopup();
     spawnZones = msg.spawnZones ?? [];
     updateMonsterCounts([]);
-    document.getElementById('order-who').textContent = [...orderTypes].map((t) => `${t}s`).join(' & ');
+    const who = [...orderTypes].map((t) => `${t}s`);
+    document.getElementById('order-who').textContent =
+      who.length > 1 ? `${who.slice(0, -1).join(', ')} & ${who.at(-1)}` : who.join('');
     view.map.getSource('zones').setData(zoneFeatures(zoneDefs, [], view.toLngLat));
     showZoneBadges(view.map, zoneDefs, view.toLngLat);
     view.map.getSource('spawn-zone').setData(spawnZoneFeatures(spawnZones, view.toLngLat));
@@ -1530,16 +1757,21 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
         showToast(msg.onTrail ? `Bloodhound #${msg.id} picked up the scent!` : `Bloodhound #${msg.id} lost the trail`,
           msg.onTrail === true);
       } else if (msg.t === 'gameOver') {
+        closePlaneGame();
         showToast(`${WINNER_TEXT[msg.winner] ?? 'Game over'} (${Math.floor(msg.monsters)} – ${Math.floor(msg.player)})`, msg.winner === 'monsters');
       } else if (msg.t === 'orderResult') {
         if (!msg.ok) showToast(`Order refused: ${msg.reason}`, false);
       } else if (msg.t === 'supplyPlane') {
-        const { x1, z1, x2, z2, show } = msg;
-        supplyPlanes.push({ x1, z1, x2, z2, at: performance.now() / 1000, seconds: show > 0 ? show : 30 });
+        const { id, x1, z1, x2, z2, show } = msg;
+        supplyPlanes.push({ id, x1, z1, x2, z2, at: performance.now() / 1000, seconds: show > 0 ? show : 30 });
         drawSupplyPlanes(view.map, view.toLngLat);
         showToast(msg.incoming
           ? 'Supply plane incoming — a crate will drop somewhere under the line'
           : 'Supply plane passed over — a crate is somewhere under the line', false);
+      } else if (['planeEnter', 'planeLeave', 'rocketLaunched', 'planeShotDown', 'planeHitResult'].includes(msg.t)) {
+        handlePlaneEvent(msg);
+      } else if (msg.t === 'newGame') {
+        closePlaneGame();
       } else if (msg.t === 'playerKilled') {
         const now = performance.now() / 1000;
         playerRespawnAt = now + (msg.respawnIn ?? 0);

@@ -6,6 +6,7 @@
   <title>MapBattle Map</title>
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/@turf/turf@7.1.0/turf.min.js"></script>
   <style>
     :root {
       --panel: rgba(18, 22, 28, 0.92);
@@ -32,6 +33,8 @@
     .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--dim); }
     .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
       margin-right: 5px; vertical-align: -1px; background: var(--c); }
+    .legend.monsters { margin-top: 4px; }
+    .legend.monsters span::before { border-radius: 50%; } /* dots, like on the map */
     .warn { color: #e07a5f; }
     #sighting { margin-top: 4px; font-size: 13px; font-weight: 600; color: var(--dim); }
     #sighting:empty { display: none; }
@@ -62,6 +65,8 @@
       border: 1px solid color-mix(in srgb, var(--c) 60%, black); background: color-mix(in srgb, var(--c) 18%, #151a20);
       color: #ece6ff; }
     .spawn-btn[data-type="overlord"] { --c: #4fd1c5; }
+    .spawn-btn[data-type="bloodhound"] { --c: #c8763a; }
+    .spawn-btn[data-type="stinger"] { --c: #d4e157; }
     .spawn-btn small { display: block; font-weight: 400; opacity: 0.75; }
     .spawn-btn:hover:not(:disabled) { border-color: var(--c); }
     .spawn-btn.short, .spawn-btn.full { opacity: 0.55; }
@@ -70,6 +75,8 @@
     #army { font-size: 13px; font-variant-numeric: tabular-nums; }
     .spawn-pop { min-width: 200px; }
     .spawn-pop .spawn-buttons { margin: 8px 0 6px; }
+    .spawn-info { display: grid; gap: 3px; margin-bottom: 6px; line-height: 1.3; }
+    .spawn-info b { color: var(--text); }
     .spawn-result { margin-top: 4px; font-size: 12px; color: #e07a5f; }
     .spawn-result:empty { display: none; }
     .spawn-result[data-ok="true"] { color: #6cc070; }
@@ -139,6 +146,50 @@
     #join-button:disabled { opacity: 0.6; cursor: wait; }
     #join-error { min-height: 1.4em; margin-top: 10px; color: #e07a5f; font-size: 13px; }
     .join-card .fine { margin: 14px 0 0; font-size: 11px; }
+    /* Supply-plane shoot-down console, on the right below the zoom buttons; a bottom sheet on phones. */
+    .aa { --aa: #7dffb0; --aa-dim: #3f7d5a; position: absolute; z-index: 3; top: 92px; right: 12px; width: 270px;
+      box-sizing: border-box; padding: 10px 12px 12px; border-radius: 8px; border: 1px solid #1f4a33;
+      background: linear-gradient(#08110c, #050a07); color: var(--aa); box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6),
+      inset 0 0 30px rgba(125, 255, 176, 0.05); font: 13px/1.35 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      user-select: none; touch-action: manipulation; }
+    .aa[hidden] { display: none; }
+    .aa-head { display: flex; justify-content: space-between; text-transform: uppercase; letter-spacing: 0.08em;
+      font-size: 11px; color: var(--aa-dim); border-bottom: 1px dashed var(--aa-dim); padding-bottom: 5px; }
+    .aa-head b { color: var(--aa); }
+    .aa-brief { margin: 6px 0 8px; font-size: 11px; color: #9fd8b5; }
+    .aa-readout { padding: 8px 6px; border-radius: 4px; background: #020604; border: 1px solid #1f4a33;
+      font-size: 15px; text-align: center; white-space: nowrap; text-shadow: 0 0 6px rgba(125, 255, 176, 0.6); }
+    .aa-slot { display: inline-block; width: 0.75em; border-bottom: 2px solid var(--aa-dim); margin: 0 1px; }
+    .aa-slot:empty::before { content: "\00a0"; }
+    .aa-slot.cur { border-bottom-color: var(--aa); animation: aa-blink 0.9s steps(1) infinite; }
+    @keyframes aa-blink { 50% { border-bottom-color: transparent; } }
+    .aa[data-state="miss"] .aa-readout { color: #ff6b5b; border-color: #6b241d; animation: aa-shake 0.3s; }
+    @keyframes aa-shake { 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+    .aa-time { height: 4px; margin-top: 8px; background: #0f2418; border-radius: 2px; overflow: hidden; }
+    .aa-time span { display: block; height: 100%; width: 100%; background: var(--aa); }
+    .aa-time-text { margin-top: 3px; font-size: 11px; color: var(--aa-dim); }
+    .aa-status { min-height: 2.7em; margin: 4px 0 8px; font-size: 12px; }
+    .aa-status[data-tone="ok"] { color: #e0f86b; }
+    .aa-status[data-tone="bad"] { color: #ff6b5b; }
+    .aa-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .aa-keys button { padding: 9px 0; border-radius: 5px; cursor: pointer; font: 700 17px/1 ui-monospace, Consolas, monospace;
+      color: var(--aa); background: #0c1d14; border: 1px solid #24563b; box-shadow: 0 2px 0 #030805; }
+    .aa-keys button:hover { border-color: var(--aa); }
+    .aa-keys button:active { transform: translateY(2px); box-shadow: none; background: #143222; }
+    .aa-keys .aa-fn { color: #e0b84f; font-size: 15px; }
+    .aa:not([data-state="entry"]):not([data-state="miss"]) .aa-keys button { opacity: 0.35; pointer-events: none; }
+    .aa-mark { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #7dffb0; box-sizing: border-box;
+      background: radial-gradient(circle, #7dffb0 2px, transparent 3px); box-shadow: 0 0 8px #7dffb0;
+      pointer-events: none; }
+    .aa-pop .maplibregl-popup-content { background: #050a07; border: 1px solid #24563b; color: #7dffb0;
+      font: 13px/1.3 ui-monospace, Consolas, monospace; }
+    .aa-pop-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: #3f7d5a; }
+    .aa-pop-coords { font-weight: 700; white-space: nowrap; }
+    @media (max-width: 600px) {
+      .aa { top: auto; bottom: 28px; left: 8px; right: 8px; width: auto; }
+      .aa-brief { display: none; }
+      .aa-keys button { padding: 11px 0; }
+    }
     .maplibregl-popup-content { background: var(--panel); color: var(--text); padding: 8px 10px; border-radius: 6px; }
     .maplibregl-popup-tip { display: none; }
   </style>
@@ -179,6 +230,12 @@
       <span style="--c:#b8b0a4">Other</span>
       <span style="--c:#6cc070">Spawn zone</span>
     </div>
+    <div class="legend monsters more">
+      <span style="--c:#a77bff">Crawler</span>
+      <span style="--c:#4fd1c5">Overlord</span>
+      <span style="--c:#c8763a">Bloodhound</span>
+      <span style="--c:#d4e157">Stinger</span>
+    </div>
     <div class="spawn-box">
       <div id="army"></div>
       <div class="energy"><div id="energy-fill"></div></div>
@@ -213,6 +270,28 @@
     <button id="recenter" class="more" type="button">Recentre on play area</button>
     <div id="coords" class="dim more">Click the map to see game coordinates.</div>
   </div>
+  <section id="aa" class="aa" hidden aria-label="Shoot down the supply plane">
+    <div class="aa-head"><span>AA battery</span><span>Supply plane <b id="aa-plane"></b></span></div>
+    <div class="aa-brief">Punch in the coordinates where its route leaves the play area.</div>
+    <div id="aa-readout" class="aa-readout" aria-live="polite"></div>
+    <div class="aa-time"><span id="aa-time-fill"></span></div>
+    <div id="aa-time-text" class="aa-time-text"></div>
+    <div id="aa-status" class="aa-status" aria-live="polite"></div>
+    <div id="aa-keys" class="aa-keys">
+      <button type="button" tabindex="-1" data-key="7">7</button>
+      <button type="button" tabindex="-1" data-key="8">8</button>
+      <button type="button" tabindex="-1" data-key="9">9</button>
+      <button type="button" tabindex="-1" data-key="4">4</button>
+      <button type="button" tabindex="-1" data-key="5">5</button>
+      <button type="button" tabindex="-1" data-key="6">6</button>
+      <button type="button" tabindex="-1" data-key="1">1</button>
+      <button type="button" tabindex="-1" data-key="2">2</button>
+      <button type="button" tabindex="-1" data-key="3">3</button>
+      <button type="button" tabindex="-1" data-key="clear" class="aa-fn" title="Clear">C</button>
+      <button type="button" tabindex="-1" data-key="0">0</button>
+      <button type="button" tabindex="-1" data-key="back" class="aa-fn" title="Delete the last digit">⌫</button>
+    </div>
+  </section>
   <script type="module" src="./map.js"></script>
 </body>
 </html>

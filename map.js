@@ -21,6 +21,7 @@ const EMPTY = { type: 'FeatureCollection', features: [] };
 const OVERLORD_COLOR = '#4fd1c5';
 const HOUND_COLOR = '#c8763a';
 const HOUND_SCENT_COLOR = '#ff5f1f';
+const STINGER_COLOR = '#d4e157';
 const ZONE_NEUTRAL = '#d9d6cf';
 const ZONE_MONSTER = '#a77bff';
 const ZONE_PLAYER = '#ff5a4f';
@@ -372,7 +373,10 @@ function wireMapClicks(map) {
 // Spawning: pick a spawn zone, then a monster type in its popup; the game picks the spot (PROTOCOL.md, "Spawning")
 // ---------------------------------------------------------------------------------------------------------------
 
-const SPAWN_TYPE_INFO = { overlord: 'Flies, sees 60 m all around, directs crawlers within 100 m to the player.' };
+const SPAWN_TYPE_INFO = {
+  overlord: 'Flies, sees 60 m all around, directs crawlers within 100 m to the player.',
+  stinger: 'Gunner: sees 160 m in a cone, shoots up to 150 m. Most accurate around 40 m, poor up close and far off; backs away from a close player.',
+};
 let spawnTypes = []; // monster types in the order the game listed them
 let spawnZones = []; // from welcome.spawnZones
 let monsterCounts = {}; // alive per type, from the latest state
@@ -901,7 +905,7 @@ function addMonsterLayers(map) {
     id: 'cone-fill', type: 'fill', source: 'cones',
     paint: {
       'fill-color': ['case', ['get', 'sees'], '#ffb347', ['==', ['get', 'type'], 'overlord'], OVERLORD_COLOR,
-        ['==', ['get', 'type'], 'bloodhound'], HOUND_COLOR, '#a77bff'],
+        ['==', ['get', 'type'], 'bloodhound'], HOUND_COLOR, ['==', ['get', 'type'], 'stinger'], STINGER_COLOR, '#a77bff'],
       'fill-opacity': ['case', ['get', 'sees'], 0.22, 0.08],
     },
   });
@@ -979,12 +983,13 @@ function addMonsterLayers(map) {
     },
   });
   const isHound = ['==', ['get', 'type'], 'bloodhound'];
+  const isStinger = ['==', ['get', 'type'], 'stinger'];
   const onScent = ['==', ['get', 'scent'], true];
   map.addLayer({
     id: 'monster-dot', type: 'circle', source: 'monsters',
     paint: {
       'circle-radius': ['case', isOverlord, 8, onScent, 7, 5],
-      'circle-color': ['case', isOverlord, OVERLORD_COLOR, onScent, HOUND_SCENT_COLOR, isHound, HOUND_COLOR, '#a77bff'],
+      'circle-color': ['case', isOverlord, OVERLORD_COLOR, onScent, HOUND_SCENT_COLOR, isHound, HOUND_COLOR, isStinger, STINGER_COLOR, '#a77bff'],
       'circle-stroke-color': ['case', isOverlord, '#e8fffd', onScent, '#ffffff', '#1a1030'],
       'circle-stroke-width': ['case', isOverlord, 2.5, onScent, 2, 1.5],
     },

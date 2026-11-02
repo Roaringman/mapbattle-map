@@ -27,7 +27,7 @@
       border: 1px solid #3a444f; background: #222a33; color: var(--dim); font: inherit; font-size: 12px; }
     #panel-toggle:hover { color: var(--text); border-color: var(--accent); }
     .maplibregl-popup { z-index: 2; } /* above the panel, so a spawn popup is never hidden behind it */
-    .panel .dim, .maplibregl-popup .dim { color: var(--dim); font-size: 12px; }
+    .panel .dim, .maplibregl-popup .dim, .join-card .dim { color: var(--dim); font-size: 12px; }
     .panel label { display: flex; gap: 8px; align-items: center; margin-top: 8px; cursor: pointer; }
     #coords { margin-top: 10px; padding-top: 8px; border-top: 1px solid #2c343d; font-variant-numeric: tabular-nums; }
     .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--dim); }
@@ -144,6 +144,23 @@
     #join-button { width: 100%; margin-top: 18px; padding: 10px; border: 0; border-radius: 6px; cursor: pointer;
       background: var(--accent); color: #1a1408; font: inherit; font-weight: 700; }
     #join-button:disabled { opacity: 0.6; cursor: wait; }
+    .join-card [hidden] { display: none !important; }
+    .lobby-primary, .lobby-secondary { width: 100%; margin-top: 18px; padding: 10px; border-radius: 6px; cursor: pointer;
+      font: inherit; font-weight: 700; border: 0; background: var(--accent); color: #1a1408; }
+    .lobby-secondary { margin-top: 12px; background: #222a33; color: var(--text); border: 1px solid #3a444f; }
+    .lobby-secondary:hover { border-color: var(--accent); }
+    .lobby-note { margin-top: 6px; }
+    .lobby-link { display: block; margin: 10px auto 0; padding: 4px; border: 0; background: none; cursor: pointer;
+      color: var(--dim); font: inherit; font-size: 12px; text-decoration: underline; }
+    #wait-view { margin-top: 14px; }
+    .wait-code { margin: 12px 0 8px; text-align: center; font: 700 24px/1.2 ui-monospace, "Cascadia Mono", Consolas, monospace;
+      letter-spacing: 0.08em; color: var(--accent); user-select: all; }
+    .wait-invite { box-sizing: border-box; width: 100%; resize: none; padding: 8px; border-radius: 6px; font: 12px/1.35 inherit;
+      border: 1px solid #3a444f; background: #10151b; color: var(--dim); }
+    .wait-status { margin-top: 10px; font-size: 13px; color: var(--text); }
+    .wait-status::before { content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 50%;
+      background: var(--accent); animation: wait-pulse 1.2s ease-in-out infinite; }
+    @keyframes wait-pulse { 50% { opacity: 0.25; } }
     #join-error { min-height: 1.4em; margin-top: 10px; color: #e07a5f; font-size: 13px; }
     .join-card .fine { margin: 14px 0 0; font-size: 11px; }
     /* Supply-plane shoot-down console, on the right below the zoom buttons; a bottom sheet on phones. */
@@ -197,19 +214,46 @@
 <body>
   <div id="map"></div>
   <div id="join">
-    <form id="join-form" class="join-card" autocomplete="off">
+    <div class="join-card">
       <h1>MapBattle</h1>
       <p>Command the monsters. Hunt the player through the streets of Jystrup.</p>
       <label for="join-name">Your name</label>
-      <input id="join-name" maxlength="20" placeholder="Shown to the host">
-      <label for="join-password">Password from the host</label>
-      <input id="join-password" placeholder="XXXX-XXXX-XXXX" spellcheck="false">
-      <label for="join-server">Game server</label>
-      <input id="join-server" spellcheck="false" placeholder="wss://…trycloudflare.com">
-      <button id="join-button" type="submit">Join</button>
+      <input id="join-name" maxlength="20" placeholder="Shown to the host" autocomplete="off">
+
+      <!-- Lobby: the bare page address. Create a game, or join one you were invited to. -->
+      <div id="lobby-view" hidden>
+        <button id="create-button" class="lobby-primary" type="button">Create a game</button>
+        <div class="dim lobby-note">You get a link and a code to send to the FPS player.</div>
+        <button id="show-join" class="lobby-secondary" type="button">Join with a code</button>
+      </div>
+
+      <!-- Join: from an invite (link + code), or "Join with a code" in the lobby. -->
+      <form id="join-form" autocomplete="off" hidden>
+        <label for="join-password">Code from the invite</label>
+        <input id="join-password" placeholder="XXXX-XXXX-XXXX" spellcheck="false">
+        <div id="join-server-box">
+          <label for="join-server">Game server <span class="dim">(optional: found from the code if empty)</span></label>
+          <input id="join-server" spellcheck="false" placeholder="wss://…trycloudflare.com">
+        </div>
+        <button id="join-button" type="submit">Join</button>
+        <button id="join-back" class="lobby-link" type="button">Back to the lobby</button>
+      </form>
+
+      <!-- Waiting: a game created here, until the FPS player starts it with the code. -->
+      <div id="wait-view" hidden>
+        <div id="wait-note" class="dim">Send the FPS player this invite. In the game's lobby they choose <b>Join game</b> and enter
+          the code. Other map players open the link and enter the same code.</div>
+        <div id="wait-code" class="wait-code"></div>
+        <textarea id="wait-invite" class="wait-invite" readonly rows="4"></textarea>
+        <button id="wait-copy" class="lobby-primary" type="button">Copy invite (link + code)</button>
+        <div id="wait-status" class="wait-status" role="status"></div>
+        <button id="wait-cancel" class="lobby-link" type="button">Cancel</button>
+      </div>
+
       <div id="join-error" role="alert"></div>
-      <p class="fine">The host sends you a link and a password. The password changes every game.</p>
-    </form>
+      <p class="fine" id="join-fine">Either side can create a game: the FPS player in the game's lobby, or you here.
+        The code changes every game.</p>
+    </div>
   </div>
   <div class="panel">
     <button id="panel-toggle" type="button" aria-expanded="true">Less</button>

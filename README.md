@@ -9,11 +9,21 @@ state. No game files are needed here.
 
 ## Playing as a map player
 
-1. Open the invite link from the host. It looks like
-   `https://roaringman.github.io/mapbattle-map/?server=wss://something.trycloudflare.com`
-2. Enter your name and the password the host gives you, then **Join**.
+Either player can create the game; the game itself always runs on the FPS player's PC.
 
-The password and the server address change every time the host starts the game.
+**Joining** an invite (a link and a code):
+
+1. Open the link. From the FPS player it looks like
+   `https://roaringman.github.io/mapbattle-map/?server=wss://something.trycloudflare.com`; from another map player,
+   `https://roaringman.github.io/mapbattle-map/?join`.
+2. Enter your name and the code, then **Join**.
+
+**Creating** a game: open https://roaringman.github.io/mapbattle-map/, choose **Create a game** and send the invite
+(link + code) to the FPS player. They choose **Join game** in the game's lobby and enter the code; the page joins by
+itself once the game is up, usually within half a minute. (The page learns the game's address through ntfy.sh; see
+"Lobby" in `PROTOCOL.md`.)
+
+The code and the server address change every game.
 
 ## Hosting (the FPS player)
 
@@ -39,6 +49,8 @@ The game only listens on `localhost:8090`; nothing else on your PC is exposed.
 - The game accepts browsers only from `localhost` and the sites in `MapSocketServer.allowedOrigins`
   (by default `https://roaringman.github.io`). Add your own Pages address there if you fork this.
 - Everything the map player sees is decided by the game; this page cannot ask for hidden information.
+- A game created from the map announces its tunnel address on a public ntfy.sh topic named after a hash of the
+  code. Anyone who finds that topic learns the address, not the code, and still needs the code to get in.
 
 ## Developing
 

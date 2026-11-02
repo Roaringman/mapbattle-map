@@ -1,7 +1,13 @@
 import { fromUtm32, toUtm32 } from './utm.js';
 
-// The game's WebSocket address comes from the invite link (?server=wss://...) or the join form.
-const DEFAULT_SERVER = new URLSearchParams(location.search).get('server') ?? 'ws://localhost:8090';
+// How the page was opened: ?server=wss://... is an invite to a game the FPS player created, ?join an invite to one
+// created on the map (the address is found from the code), neither the lobby, where a map player can create a game.
+const PARAMS = new URLSearchParams(location.search);
+const INVITE_SERVER = PARAMS.get('server') ?? '';
+// Where a game created from the map learns the host's address; see "Lobby" in PROTOCOL.md. Overridable on localhost
+// only, for testing against a stand-in.
+const RENDEZVOUS = (/^(localhost|127\.0\.0\.1)$/.test(location.hostname) && PARAMS.get('rendezvous')) || 'https://ntfy.sh';
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 letters and digits, none that look alike
 // The message format this page understands; see PROTOCOL.md. Must match the game's MapSocketServer.ProtocolVersion.
 const PROTOCOL_VERSION = 2;
 const HEADING_LENGTH_M = 14;
@@ -114,50 +120,233 @@ function saveName(name) {
   try { localStorage.setItem('mapbattle.name', name); } catch { /* storage unavailable: not important */ }
 }
 
+/** A new game code, XXXX-XXXX-XXXX: 60 random bits, the same shape as the passwords the game makes. */
+function newGameCode() {
+  const chars = [...crypto.getRandomValues(new Uint8Array(12))].map((b) => CODE_ALPHABET[b % 32]); // 256 % 32 = 0: unbiased
+  return [0, 4, 8].map((i) => chars.slice(i, i + 4).join('')).join('-');
+}
+
+/** Case, spaces and dashes don't count, as in the game's password check. */
+function normaliseCode(code) {
+  return code.toUpperCase().replace(/[\s-]/g, '');
+}
+
+/** The rendezvous topic for a code: a hash, so the topic doesn't give the code (the game's password) away. */
+async function rendezvousTopic(code) {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`mapbattle:${normaliseCode(code)}`));
+  return `mapbattle-${[...new Uint8Array(hash)].slice(0, 16).map((b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** The server address in one line of the rendezvous stream, if it is a `hostReady` message with a sane address. */
+function hostReadyServer(line) {
+  try {
+    const event = JSON.parse(line);
+    if (event.event !== 'message') return null;
+    const msg = JSON.parse(event.message);
+    if (msg.t !== 'hostReady' || typeof msg.server !== 'string') return null;
+    const ok = /^wss:\/\/[^\s/?#]+\/?$/.test(msg.server) || /^ws:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/?$/.test(msg.server);
+    return ok ? msg.server.replace(/\/$/, '') : null;
+  } catch {
+    return null; // keepalives, other messages, junk: not for us
+  }
+}
+
+/**
+ * Listens on the code's rendezvous topic for the game's `hostReady` (earlier ones included, so it works whichever
+ * side is first) and calls onServer with each address. onTrouble(text) while the rendezvous can't be reached,
+ * onTrouble(null) once it can again. Returns { stop() }.
+ */
+function watchForHost(code, onServer, onTrouble) {
+  const abort = new AbortController();
+  let stopped = false;
+  (async () => {
+    const topic = await rendezvousTopic(code);
+    while (!stopped) {
+      try {
+        const response = await fetch(`${RENDEZVOUS}/${topic}/json?since=all`, { signal: abort.signal, cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        onTrouble(null);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+          for (const line of lines) {
+            const server = hostReadyServer(line);
+            if (server && !stopped) onServer(server);
+          }
+        }
+      } catch {
+        if (stopped) return;
+        onTrouble("Can't reach the lobby service. Retrying…");
+      }
+      if (!stopped) await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+  })();
+  return { stop() { stopped = true; abort.abort(); } };
+}
+
+function inviteText(code) {
+  const link = `${location.origin}${location.pathname}?join`;
+  return `Join my MapBattle game!\nCode: ${code}\n` +
+    `FPS player: in the game's lobby choose Join game and enter the code.\n` +
+    `Map players: open ${link} and enter the code.`;
+}
+
 function main() {
-  const form = document.getElementById('join-form');
-  const serverInput = document.getElementById('join-server');
-  const nameInput = document.getElementById('join-name');
-  const passwordInput = document.getElementById('join-password');
-  const error = document.getElementById('join-error');
-  const button = document.getElementById('join-button');
+  const el = (id) => document.getElementById(id);
+  const form = el('join-form');
+  const serverInput = el('join-server');
+  const nameInput = el('join-name');
+  const passwordInput = el('join-password');
+  const error = el('join-error');
+  const button = el('join-button');
+  const waitStatus = el('wait-status');
 
   wirePanelToggle();
   wirePlaneKeypad();
-  serverInput.value = DEFAULT_SERVER;
   nameInput.value = loadName();
-  (nameInput.value ? passwordInput : nameInput).focus();
 
-  let game = null;
-  form.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const server = normaliseServerUrl(serverInput.value);
-    if (!server) { error.textContent = 'Enter the server address from the invite.'; return; }
-    if (!passwordInput.value.trim()) { error.textContent = 'Enter the password from the host.'; return; }
-    saveName(nameInput.value.trim());
-    error.textContent = '';
-    button.disabled = true;
-    button.textContent = 'Joining…';
+  const views = { lobby: el('lobby-view'), join: form, wait: el('wait-view') };
+  const showView = (name) => {
+    for (const [key, view] of Object.entries(views)) view.hidden = key !== name;
+    el('join-fine').hidden = name === 'wait';
+  };
 
+  let game = null; // the connection, once there is an address to connect to
+  let watch = null; // the rendezvous, while looking for a game's address by its code
+  let retryTimer = 0;
+  const stop = () => {
+    game?.close();
+    game = null;
+    watch?.stop();
+    watch = null;
+    clearTimeout(retryTimer);
+  };
+  const resetJoinButton = () => {
+    button.disabled = false;
+    button.textContent = 'Join';
+  };
+
+  // Every way into a game ends here, or back on the join form with the reason.
+  const failed = (reason, code) => {
+    stop();
+    resetJoinButton();
+    if (code !== undefined) passwordInput.value = code;
+    showView('join');
+    error.textContent = reason;
+    showJoinScreen(true);
+    passwordInput.select();
+  };
+  const connect = (server, code, { onUnreachable } = {}) => {
     game?.close();
     game = connectToGame({
       server,
-      password: passwordInput.value,
+      password: code,
       name: nameInput.value.trim(),
-      onJoinFailed(reason) {
-        button.disabled = false;
-        button.textContent = 'Join';
-        error.textContent = reason;
-        showJoinScreen(true);
-        passwordInput.select();
+      onJoinFailed(reason, { unreachable } = {}) {
+        if (unreachable && onUnreachable) onUnreachable();
+        else failed(reason, code);
       },
       onJoined() {
-        button.disabled = false;
-        button.textContent = 'Join';
+        watch?.stop();
+        watch = null;
+        resetJoinButton();
         showJoinScreen(false);
       },
     });
+  };
+
+  /** A game known only by its code: wait for its address on the rendezvous, then join it with the code. */
+  const findAndJoin = (code, { created }) => {
+    stop();
+    el('wait-note').hidden = !created;
+    el('wait-code').textContent = code;
+    el('wait-invite').value = inviteText(code);
+    el('wait-copy').textContent = 'Copy invite (link + code)';
+    const waiting = created ? 'Waiting for the FPS player to start the game with this code…' : 'Looking for the game…';
+    waitStatus.textContent = waiting;
+    showView('wait');
+
+    let server = null;
+    const tryServer = () => {
+      waitStatus.textContent = 'Found the game. Connecting…';
+      connect(server, code, {
+        // A fresh Cloudflare tunnel can take a little while to answer: keep trying while still looking.
+        onUnreachable() {
+          waitStatus.textContent = 'Found the game. Waiting for its address to come online…';
+          retryTimer = setTimeout(tryServer, 3000);
+        },
+      });
+    };
+    watch = watchForHost(code, (found) => {
+      if (found === server) return;
+      server = found; // the newest wins: a host that restarted with the same code publishes again
+      clearTimeout(retryTimer);
+      tryServer();
+    }, (trouble) => {
+      if (!server) waitStatus.textContent = trouble ?? waiting;
+    });
+  };
+
+  el('create-button').addEventListener('click', () => {
+    saveName(nameInput.value.trim());
+    error.textContent = '';
+    findAndJoin(newGameCode(), { created: true });
   });
+  el('show-join').addEventListener('click', () => {
+    error.textContent = '';
+    el('join-server-box').hidden = false;
+    showView('join');
+    passwordInput.focus();
+  });
+  el('join-back').addEventListener('click', () => {
+    stop();
+    resetJoinButton();
+    error.textContent = '';
+    showView('lobby');
+  });
+  el('wait-cancel').addEventListener('click', () => {
+    stop();
+    showView('lobby');
+  });
+  el('wait-copy').addEventListener('click', () => {
+    navigator.clipboard.writeText(el('wait-invite').value)
+      .then(() => { el('wait-copy').textContent = 'Copied!'; })
+      .catch(() => el('wait-invite').select()); // no clipboard access: select it for copying by hand
+  });
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const code = passwordInput.value.trim();
+    if (!code) { error.textContent = 'Enter the code from the invite.'; return; }
+    saveName(nameInput.value.trim());
+    error.textContent = '';
+    const server = normaliseServerUrl(serverInput.value);
+    if (!server) {
+      findAndJoin(code, { created: false });
+      return;
+    }
+    button.disabled = true;
+    button.textContent = 'Joining…';
+    stop();
+    connect(server, code);
+  });
+
+  if (INVITE_SERVER) {
+    serverInput.value = INVITE_SERVER;
+    showView('join');
+  } else if (PARAMS.has('join')) {
+    el('join-server-box').hidden = true; // the code is all a map-created game's invite needs
+    showView('join');
+  } else {
+    showView('lobby');
+  }
+  (nameInput.value && !views.join.hidden ? passwordInput : nameInput).focus();
 }
 
 /** "More" / "Less" on the panel: compact keeps only what matters while playing. Compact by default on phones. */
@@ -1608,9 +1797,9 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
   };
 
   // Back to the join screen, leaving the status line in a sensible state behind it.
-  const fail = (reason) => {
+  const fail = (reason, info) => {
     setStatus("Not connected", "offline");
-    onJoinFailed(reason);
+    onJoinFailed(reason, info);
   };
 
   let retryMs = 1000;
@@ -1795,7 +1984,8 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
       if (closedByUs) return;
       if (!everJoined) {
         // Never got in: wrong address, game not running, or the page's site isn't allowed by the game.
-        fail(`Could not reach the game at ${server}. Check the address, and that the host is playing.`);
+        fail(`Could not reach the game at ${server}. Check the address, and that the host is playing.`,
+          { unreachable: true });
         return;
       }
       setStatus(`Lost connection to the game. Retrying in ${Math.round(retryMs / 1000)} s…`, 'offline');

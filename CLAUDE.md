@@ -24,11 +24,16 @@ Libraries: MapLibre GL JS 4.7.1 and Turf 7.1.0 (route/play-area crossings for th
 
 - Local: `node serve.mjs` → http://localhost:8080/?server=ws://localhost:8090 (the `map-client` launch config).
   Needs the host's game in Play mode; the password is in the game's invite panel (Esc) and Unity console.
+  On localhost, `?rendezvous=http://localhost:…` swaps ntfy.sh for a local stand-in.
 - Production: push to `main`; Pages redeploys in about a minute.
 
 ## How the client works
 
-1. Join screen: server address (from `?server=`), name (remembered in localStorage), password (never stored).
+1. Join screen, three views: the **lobby** (bare URL: *Create a game* or *Join with a code*), the **join form**
+   (`?server=` from an FPS-created invite, or `?join` from a map-created one: name, code, optional server) and
+   **waiting** (a code with no server: the page generates or takes the code, listens on the ntfy.sh rendezvous for
+   the game's `hostReady`, then joins). Name remembered in localStorage; the code is never stored. See "Lobby" in
+   `PROTOCOL.md`.
 2. Send `join`; on `joinResult` ok, wait for `welcome`, which carries the whole map (`area`). The map is created on
    the first `welcome`; later joins only refresh its data.
 3. Ignore `state` and events until `welcome` is handled, then redraw from each `state` (10 Hz).

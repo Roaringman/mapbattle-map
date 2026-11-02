@@ -25,6 +25,49 @@ a clicked point, and the single `welcome.spawnZone` became the list `welcome.spa
 - The game accepts browser origins `localhost` and those in `MapSocketServer.allowedOrigins`
   (`https://roaringman.github.io`). Other origins are refused during the handshake.
 
+## Lobby: who creates the game
+
+Both sides implement this: the game's start menu (`GameLobby`), the code check (`MapAccess.TryParseCode`) and the
+publish (`MapRendezvous`), and the page's lobby, join form and waiting view.
+
+The game always runs on the FPS player's PC (it is the server and the tunnel). Either player can **create** it:
+
+| Created by | What they share | What the other side does |
+|---|---|---|
+| **FPS player** (in the game's lobby: *Create game*) | Link `…/mapbattle-map/?server=wss://…` + the code (the session password) the game generated | Map players open the link and enter the code. |
+| **Map player** (the page opened without `?server`/`?join`: *Create a game*) | Link `…/mapbattle-map/?join` + a code the **page** generated | The FPS player chooses *Join game* in the game's lobby and enters the code; the game then hosts with that code as its session password. Other map players open the link and enter the code. |
+
+When the map creates the game the page doesn't know the host's tunnel address, so the game announces it on a
+**rendezvous**, a public pub/sub topic named after the code:
+
+1. **Code.** 12 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, shown as `XXXX-XXXX-XXXX` (60 random bits).
+   Normalised like the password: upper case, spaces and dashes removed. In *Join game* the game takes the code
+   as its session password (instead of generating one) and starts the tunnel as usual.
+2. **Topic.** `mapbattle-` + the first 32 hex digits (lower case) of SHA-256 of the UTF-8 string
+   `mapbattle:<normalised code>`. Example: code `UPGD-Y48J-TM9B` → `mapbattle-0990d0c515ee75e26af05786f18c2854`.
+   The hash keeps the code (the password) off the rendezvous.
+3. **Publish (game).** Once the tunnel address is known, `POST https://ntfy.sh/<topic>` with this body
+   (plain text, no auth; ntfy.sh caches it for hours, so a page that starts listening later still gets it). The game
+   waits about 12 s after the tunnel reports its address (`MapRendezvous.announceDelaySeconds`): a waiting page
+   connects at once, and a resolver asked about a brand-new `trycloudflare.com` name in its first seconds was seen
+   to answer "no such host" and keep answering that for minutes. Without a tunnel (cloudflared missing or off) it
+   publishes `ws://localhost:8090`, which only a page on the host's PC can use:
+
+   ```json
+   { "t": "hostReady", "server": "wss://<random>.trycloudflare.com", "protocolVersion": 2 }
+   ```
+
+   Publish again if the address changes. The game **should** also publish for games the FPS player created, so a map
+   player can join with the code alone (the page's server field is optional).
+4. **Listen (page).** `GET https://ntfy.sh/<topic>/json?since=all`: a stream of JSON lines; lines with
+   `"event": "message"` carry the body above in `message`. The newest `hostReady` wins. The page connects to
+   `server` and sends the usual `join` with the code as `password`. It keeps retrying while the address doesn't
+   answer yet (a fresh quick tunnel can take a few seconds) and stops listening once joined.
+   It accepts only `wss://host` addresses (`ws://localhost` for testing).
+
+The rendezvous only carries the address; the code is still what lets anyone in, checked by `join` as before.
+For testing, a page on `localhost` takes `?rendezvous=http://localhost:…` in place of `https://ntfy.sh`.
+
 ## Conventions
 
 - **Positions are local metres from the play-area origin**: `x` = east, `z` = north. The `area` data uses `x`/`y`

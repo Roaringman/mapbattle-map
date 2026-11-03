@@ -63,8 +63,8 @@ Libraries: MapLibre GL JS 4.7.1 and Turf 7.1.0 (route/play-area crossings for th
    ~0.3 s, then drag draws a selection box (a drag that starts straight away still pans); the selection gets one
    order with `target` as a list of ids, and monsters sharing a move-to point share one pin.
 6. Supply-plane shoot-down: on `planeEnter` a console opens on the right (bottom sheet on phones). Turf finds where
-   the plane's route leaves the play-area square; a popup there shows that point as WGS84 with 3 decimals, and the
-   map player clicks those 10 digits on the console's keypad (pointer only, no typing). A correct entry sends
+   the plane's route leaves the play-area square; a popup there shows that point as WGS84 with 4 decimals, and the
+   map player clicks those 12 digits on the console's keypad (pointer only, no typing). A correct entry sends
    `planeHit`; the game answers with `rocketLaunched`/`planeShotDown` or `planeHitResult`, and `planeLeave` ends it.
 7. If the connection drops after joining, reconnect with the same password. "Wrong password." on a reconnect means the
    host restarted: back to the join screen with that explanation.

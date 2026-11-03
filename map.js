@@ -1439,9 +1439,9 @@ function routeCrossings(plane, toLngLat) {
   return { start, entry: points.length > 1 ? points[0] : null, exit: points.at(-1) };
 }
 
-/** "55.518° N, 11.862° E": three decimals, so the keypad needs ten digits here. */
+/** "55.5183° N, 11.8624° E": four decimals, so the keypad needs twelve digits here. */
 function wgsText([lng, lat]) {
-  return `${Math.abs(lat).toFixed(3)}° ${lat < 0 ? 'S' : 'N'}, ${Math.abs(lng).toFixed(3)}° ${lng < 0 ? 'W' : 'E'}`;
+  return `${Math.abs(lat).toFixed(4)}° ${lat < 0 ? 'S' : 'N'}, ${Math.abs(lng).toFixed(4)}° ${lng < 0 ? 'W' : 'E'}`;
 }
 
 function openPlaneGame(id) {

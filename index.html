@@ -131,7 +131,7 @@
     #join { position: absolute; inset: 0; z-index: 10; display: grid; place-items: center; padding: 16px;
       background: radial-gradient(ellipse at top, #1e2731, #0d1116 70%); }
     #join[hidden] { display: none; }
-    .join-card { width: min(380px, 100%); background: var(--panel); border: 1px solid #2c343d; border-radius: 10px;
+    .join-card { box-sizing: border-box; width: min(380px, 100%); background: var(--panel); border: 1px solid #2c343d; border-radius: 10px;
       padding: 20px 22px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45); }
     .join-card h1 { margin: 0; font-size: 22px; color: var(--accent); letter-spacing: 0.02em; }
     .join-card p { margin: 6px 0 16px; color: var(--dim); }
@@ -150,6 +150,9 @@
     .lobby-secondary { margin-top: 12px; background: #222a33; color: var(--text); border: 1px solid #3a444f; }
     .lobby-secondary:hover { border-color: var(--accent); }
     .lobby-note { margin-top: 6px; }
+    .lobby-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .lobby-status { margin-top: 12px; font-size: 12px; color: var(--dim); }
+    .lobby-status:empty { display: none; }
     .lobby-link { display: block; margin: 10px auto 0; padding: 4px; border: 0; background: none; cursor: pointer;
       color: var(--dim); font: inherit; font-size: 12px; text-decoration: underline; }
     #wait-view { margin-top: 14px; }
@@ -225,16 +228,13 @@
         <button id="create-button" class="lobby-primary" type="button">Create a game</button>
         <div class="dim lobby-note">You get a link and a code to send to the FPS player.</div>
         <button id="show-join" class="lobby-secondary" type="button">Join with a code</button>
+        <div id="lobby-status" class="lobby-status" role="status"></div>
       </div>
 
       <!-- Join: from an invite (link + code), or "Join with a code" in the lobby. -->
       <form id="join-form" autocomplete="off" hidden>
         <label for="join-password">Code from the invite</label>
         <input id="join-password" placeholder="XXXX-XXXX-XXXX" spellcheck="false">
-        <div id="join-server-box">
-          <label for="join-server">Game server <span class="dim">(optional: found from the code if empty)</span></label>
-          <input id="join-server" spellcheck="false" placeholder="wss://…trycloudflare.com">
-        </div>
         <button id="join-button" type="submit">Join</button>
         <button id="join-back" class="lobby-link" type="button">Back to the lobby</button>
       </form>

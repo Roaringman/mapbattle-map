@@ -17,23 +17,34 @@ Never read or reference files from the Unity project; if the client needs data, 
 | `utm.js` | lat/lon ↔ ETRS89 / UTM 32N. Same formulas as `UtmProjection.cs` in the game: change both together. |
 | `PROTOCOL.md` | Message format, shared with the game. |
 | `serve.mjs` | Local dev server only (Pages serves the same files). |
+| `relay/room.js` | The relay's one game room: lobby, limits (1 host + 4 map players, one game at a time), routing. Platform-free. |
+| `relay/worker.js`, `relay/wrangler.toml` | The relay on Cloudflare Workers: one Durable Object holds the room. `npx wrangler deploy` in `relay/`. |
+| `relay/dev-server.mjs` | The same room on Node for local testing (port 8787), with a built-in WebSocket server: no packages. |
+| `relay/test.mjs`, `relay/mock-host.mjs` | End-to-end relay checks, and a fake game on the host link (reference for the Unity side). |
+
+The relay passes game messages through unread: game rules stay in the game, as for the page. Keep `room.js` free of
+platform APIs so the Worker and the Node dev server share it.
 
 Libraries: MapLibre GL JS 4.7.1 and Turf 7.1.0 (route/play-area crossings for the plane minigame) from unpkg, pinned. No npm, no bundler; keep it that way unless there's a real need.
 
 ## Running
 
-- Local: `node serve.mjs` → http://localhost:8080/?server=ws://localhost:8090 (the `map-client` launch config).
+- Local, through the relay: `node relay/dev-server.mjs`, `node serve.mjs` → http://localhost:8080/ (the page on
+  localhost defaults to `ws://localhost:8787`); `node relay/mock-host.mjs ws://localhost:8787 <code>` plays the game.
+  `node relay/test.mjs [relay]` checks a relay. http://localhost:8080/?relay=live uses the deployed relay instead.
+- Local, direct to today's game: http://localhost:8080/?server=ws://localhost:8090 (the `map-client` launch config).
   Needs the host's game in Play mode; the password is in the game's invite panel (Esc) and Unity console.
-  On localhost, `?rendezvous=http://localhost:…` swaps ntfy.sh for a local stand-in.
-- Production: push to `main`; Pages redeploys in about a minute.
+- Production: push to `main`; Pages redeploys in about a minute. The relay deploys separately (`npx wrangler deploy`
+  in `relay/`); its address is `RELAY_URL` in `map.js`.
 
 ## How the client works
 
-1. Join screen, three views: the **lobby** (bare URL: *Create a game* or *Join with a code*), the **join form**
-   (`?server=` from an FPS-created invite, or `?join` from a map-created one: name, code, optional server) and
-   **waiting** (a code with no server: the page generates or takes the code, listens on the ntfy.sh rendezvous for
-   the game's `hostReady`, then joins). Name remembered in localStorage; the code is never stored. See "Lobby" in
-   `PROTOCOL.md`.
+1. Join screen, three views: the **lobby** (bare URL: *Create a game*, greyed out while the relay's one game is
+   running per `/status`, or *Join with a code*), the **join form** (`?join` invites; `?server=` for a game that
+   hosts itself) and **waiting** (after `create`, or a join before the host is there: the relay's `created` /
+   `lobby`). One connection throughout: the relay hands it to the game when the host comes. Mid-game `lobby`
+   `hostAway` clears the live layers and waits; `ended` goes back to the join form. Name remembered in localStorage;
+   the code is never stored. See "Relay" in `PROTOCOL.md`.
 2. Send `join`; on `joinResult` ok, wait for `welcome`, which carries the whole map (`area`). The map is created on
    the first `welcome`; later joins only refresh its data.
 3. Ignore `state` and events until `welcome` is handled, then redraw from each `state` (10 Hz).

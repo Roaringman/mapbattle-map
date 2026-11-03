@@ -1,13 +1,17 @@
 import { fromUtm32, toUtm32 } from './utm.js';
 
-// How the page was opened: ?server=wss://... is an invite to a game the FPS player created, ?join an invite to one
-// created on the map (the address is found from the code), neither the lobby, where a map player can create a game.
+// Every game goes through the relay (relay/ in this repository; "Relay" in PROTOCOL.md), which runs one game at a
+// time. On localhost the dev relay (node relay/dev-server.mjs) is the default.
 const PARAMS = new URLSearchParams(location.search);
-const INVITE_SERVER = PARAMS.get('server') ?? '';
-// Where a game created from the map learns the host's address; see "Lobby" in PROTOCOL.md. Overridable on localhost
-// only, for testing against a stand-in.
-const RENDEZVOUS = (/^(localhost|127\.0\.0\.1)$/.test(location.hostname) && PARAMS.get('rendezvous')) || 'https://ntfy.sh';
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 letters and digits, none that look alike
+const LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+const LIVE_RELAY = 'wss://mapbattle-relay.mapbattle.workers.dev';
+// On localhost, ?relay=live (or an address) tries the page against the deployed relay.
+const RELAY_URL = !LOCAL ? LIVE_RELAY
+  : PARAMS.get('relay') === 'live' ? LIVE_RELAY : PARAMS.get('relay') || 'ws://localhost:8787';
+// ?server= overrides it: an older game hosting itself through its own tunnel, or another relay. Used as given.
+const DIRECT_SERVER = PARAMS.get('server') ?? '';
+const PLAY_URL = DIRECT_SERVER || `${RELAY_URL}/play`;
+const STATUS_URL = DIRECT_SERVER ? '' : `${RELAY_URL.replace(/^ws/, 'http')}/status`;
 // The message format this page understands; see PROTOCOL.md. Must match the game's MapSocketServer.ProtocolVersion.
 const PROTOCOL_VERSION = 2;
 const HEADING_LENGTH_M = 14;
@@ -120,76 +124,6 @@ function saveName(name) {
   try { localStorage.setItem('mapbattle.name', name); } catch { /* storage unavailable: not important */ }
 }
 
-/** A new game code, XXXX-XXXX-XXXX: 60 random bits, the same shape as the passwords the game makes. */
-function newGameCode() {
-  const chars = [...crypto.getRandomValues(new Uint8Array(12))].map((b) => CODE_ALPHABET[b % 32]); // 256 % 32 = 0: unbiased
-  return [0, 4, 8].map((i) => chars.slice(i, i + 4).join('')).join('-');
-}
-
-/** Case, spaces and dashes don't count, as in the game's password check. */
-function normaliseCode(code) {
-  return code.toUpperCase().replace(/[\s-]/g, '');
-}
-
-/** The rendezvous topic for a code: a hash, so the topic doesn't give the code (the game's password) away. */
-async function rendezvousTopic(code) {
-  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`mapbattle:${normaliseCode(code)}`));
-  return `mapbattle-${[...new Uint8Array(hash)].slice(0, 16).map((b) => b.toString(16).padStart(2, '0')).join('')}`;
-}
-
-/** The server address in one line of the rendezvous stream, if it is a `hostReady` message with a sane address. */
-function hostReadyServer(line) {
-  try {
-    const event = JSON.parse(line);
-    if (event.event !== 'message') return null;
-    const msg = JSON.parse(event.message);
-    if (msg.t !== 'hostReady' || typeof msg.server !== 'string') return null;
-    const ok = /^wss:\/\/[^\s/?#]+\/?$/.test(msg.server) || /^ws:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/?$/.test(msg.server);
-    return ok ? msg.server.replace(/\/$/, '') : null;
-  } catch {
-    return null; // keepalives, other messages, junk: not for us
-  }
-}
-
-/**
- * Listens on the code's rendezvous topic for the game's `hostReady` (earlier ones included, so it works whichever
- * side is first) and calls onServer with each address. onTrouble(text) while the rendezvous can't be reached,
- * onTrouble(null) once it can again. Returns { stop() }.
- */
-function watchForHost(code, onServer, onTrouble) {
-  const abort = new AbortController();
-  let stopped = false;
-  (async () => {
-    const topic = await rendezvousTopic(code);
-    while (!stopped) {
-      try {
-        const response = await fetch(`${RENDEZVOUS}/${topic}/json?since=all`, { signal: abort.signal, cache: 'no-store' });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        onTrouble(null);
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        for (;;) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop();
-          for (const line of lines) {
-            const server = hostReadyServer(line);
-            if (server && !stopped) onServer(server);
-          }
-        }
-      } catch {
-        if (stopped) return;
-        onTrouble("Can't reach the lobby service. Retrying…");
-      }
-      if (!stopped) await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
-  })();
-  return { stop() { stopped = true; abort.abort(); } };
-}
-
 function inviteText(code) {
   const link = `${location.origin}${location.pathname}?join`;
   return `Join my MapBattle game!\nCode: ${code}\n` +
@@ -197,10 +131,26 @@ function inviteText(code) {
     `Map players: open ${link} and enter the code.`;
 }
 
+/** Lobby info from the relay ({ state, maps, maxMaps }), or null when it can't be asked. */
+async function relayStatus() {
+  if (!STATUS_URL) return null;
+  try {
+    const response = await fetch(STATUS_URL, { cache: 'no-store' });
+    return response.ok ? await response.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+// What the relay's `lobby` states mean to someone waiting.
+const WAITING_TEXT = {
+  waitingForHost: 'Waiting for the FPS player to start the game with this code…',
+  hostAway: 'The FPS player lost connection. Waiting for them to come back…',
+};
+
 function main() {
   const el = (id) => document.getElementById(id);
   const form = el('join-form');
-  const serverInput = el('join-server');
   const nameInput = el('join-name');
   const passwordInput = el('join-password');
   const error = el('join-error');
@@ -217,90 +167,80 @@ function main() {
     el('join-fine').hidden = name === 'wait';
   };
 
-  let game = null; // the connection, once there is an address to connect to
-  let watch = null; // the rendezvous, while looking for a game's address by its code
-  let retryTimer = 0;
+  // The lobby says whether the one game the relay allows is already running.
+  const refreshLobby = async () => {
+    const status = await relayStatus();
+    const busy = status !== null && status.state !== 'idle';
+    el('create-button').disabled = busy;
+    el('lobby-status').textContent = status === null ? ''
+      : busy ? `A game is running (${status.maps}/${status.maxMaps} map players). Join it with its code, or create one ` +
+        'when it is over.'
+      : 'No game is running right now.';
+  };
+  setInterval(() => { if (!views.lobby.hidden && !el('join').hidden) refreshLobby(); }, 10_000);
+
+  let game = null;
   const stop = () => {
     game?.close();
     game = null;
-    watch?.stop();
-    watch = null;
-    clearTimeout(retryTimer);
   };
   const resetJoinButton = () => {
     button.disabled = false;
     button.textContent = 'Join';
   };
 
-  // Every way into a game ends here, or back on the join form with the reason.
+  // Every way into a game ends in onJoined, or back here on the join form with the reason.
   const failed = (reason, code) => {
     stop();
     resetJoinButton();
-    if (code !== undefined) passwordInput.value = code;
+    if (code) passwordInput.value = code;
     showView('join');
     error.textContent = reason;
     showJoinScreen(true);
     passwordInput.select();
   };
-  const connect = (server, code, { onUnreachable } = {}) => {
-    game?.close();
+  const showWaiting = (code, { created }) => {
+    el('wait-note').hidden = !created;
+    el('wait-code').textContent = code;
+    el('wait-invite').value = inviteText(code);
+    el('wait-copy').textContent = 'Copy invite (link + code)';
+    el('wait-cancel').textContent = created ? 'Cancel the game' : 'Back to the lobby';
+    showView('wait');
+  };
+
+  /** Creates a game (the relay makes the code) or joins one with a code, over the same connection. */
+  const play = ({ create = false, code = '' }) => {
+    stop();
+    error.textContent = '';
+    saveName(nameInput.value.trim());
     game = connectToGame({
-      server,
+      server: PLAY_URL,
+      create,
       password: code,
       name: nameInput.value.trim(),
-      onJoinFailed(reason, { unreachable } = {}) {
-        if (unreachable && onUnreachable) onUnreachable();
-        else failed(reason, code);
+      onCreated(newCode) {
+        code = newCode;
+        showWaiting(code, { created: true });
       },
+      onWaiting(state) {
+        if (views.wait.hidden) showWaiting(code, { created: false });
+        waitStatus.textContent = WAITING_TEXT[state] ?? 'Waiting…';
+      },
+      onJoinFailed(reason) { failed(reason, code); },
       onJoined() {
-        watch?.stop();
-        watch = null;
         resetJoinButton();
         showJoinScreen(false);
       },
     });
   };
 
-  /** A game known only by its code: wait for its address on the rendezvous, then join it with the code. */
-  const findAndJoin = (code, { created }) => {
-    stop();
-    el('wait-note').hidden = !created;
-    el('wait-code').textContent = code;
-    el('wait-invite').value = inviteText(code);
-    el('wait-copy').textContent = 'Copy invite (link + code)';
-    const waiting = created ? 'Waiting for the FPS player to start the game with this code…' : 'Looking for the game…';
-    waitStatus.textContent = waiting;
-    showView('wait');
-
-    let server = null;
-    const tryServer = () => {
-      waitStatus.textContent = 'Found the game. Connecting…';
-      connect(server, code, {
-        // A fresh Cloudflare tunnel can take a little while to answer: keep trying while still looking.
-        onUnreachable() {
-          waitStatus.textContent = 'Found the game. Waiting for its address to come online…';
-          retryTimer = setTimeout(tryServer, 3000);
-        },
-      });
-    };
-    watch = watchForHost(code, (found) => {
-      if (found === server) return;
-      server = found; // the newest wins: a host that restarted with the same code publishes again
-      clearTimeout(retryTimer);
-      tryServer();
-    }, (trouble) => {
-      if (!server) waitStatus.textContent = trouble ?? waiting;
-    });
-  };
-
   el('create-button').addEventListener('click', () => {
-    saveName(nameInput.value.trim());
-    error.textContent = '';
-    findAndJoin(newGameCode(), { created: true });
+    showWaiting('····-····-····', { created: true });
+    waitStatus.textContent = 'Creating a game…';
+    play({ create: true });
   });
   el('show-join').addEventListener('click', () => {
     error.textContent = '';
-    el('join-server-box').hidden = false;
     showView('join');
     passwordInput.focus();
   });
@@ -309,10 +249,13 @@ function main() {
     resetJoinButton();
     error.textContent = '';
     showView('lobby');
+    refreshLobby();
   });
   el('wait-cancel').addEventListener('click', () => {
-    stop();
+    game?.cancel(); // ends a game created here that nobody started yet, so the relay is free again at once
+    game = null;
     showView('lobby');
+    refreshLobby();
   });
   el('wait-copy').addEventListener('click', () => {
     navigator.clipboard.writeText(el('wait-invite').value)
@@ -324,27 +267,17 @@ function main() {
     e.preventDefault();
     const code = passwordInput.value.trim();
     if (!code) { error.textContent = 'Enter the code from the invite.'; return; }
-    saveName(nameInput.value.trim());
-    error.textContent = '';
-    const server = normaliseServerUrl(serverInput.value);
-    if (!server) {
-      findAndJoin(code, { created: false });
-      return;
-    }
     button.disabled = true;
     button.textContent = 'Joining…';
-    stop();
-    connect(server, code);
+    play({ code });
   });
 
-  if (INVITE_SERVER) {
-    serverInput.value = INVITE_SERVER;
-    showView('join');
-  } else if (PARAMS.has('join')) {
-    el('join-server-box').hidden = true; // the code is all a map-created game's invite needs
+  // ?join (an invite) and ?server= (an older game's own address) go straight to the code; otherwise the lobby.
+  if (PARAMS.has('join') || DIRECT_SERVER) {
     showView('join');
   } else {
     showView('lobby');
+    refreshLobby();
   }
   (nameInput.value && !views.join.hidden ? passwordInput : nameInput).focus();
 }
@@ -1783,10 +1716,12 @@ function playerFeatures(player, toLngLat) {
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
- * Opens the WebSocket to the game, sends the password, and draws everything the game sends. After a successful join
- * it reconnects on its own when the connection drops, using the same password. Returns { close() }.
+ * Opens the WebSocket to the relay (or a game directly), creates a game (`create`) or sends the password, and draws
+ * everything the game sends. Until the host takes the game, the relay says `created` (with the new code) and `lobby`
+ * (waiting); onCreated / onWaiting pass that on. After that it reconnects on its own when the connection drops,
+ * using the same code. Returns { close(), cancel() }.
  */
-function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
+function connectToGame({ server, create = false, password, name, onJoined, onJoinFailed, onCreated, onWaiting }) {
   const status = document.getElementById('connection');
   const setStatus = (text, state) => {
     status.textContent = text;
@@ -1901,8 +1836,8 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
       return;
     }
 
-    // The game sends nothing until it has the password.
-    socket.onopen = () => socket.send(JSON.stringify({ t: 'join', password, name }));
+    // Nothing comes back until the relay or the game has the password (or the request for a new game).
+    socket.onopen = () => socket.send(JSON.stringify(create ? { t: 'create', name } : { t: 'join', password, name }));
 
     socket.onmessage = (event) => {
       const msg = JSON.parse(event.data);
@@ -1916,8 +1851,38 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
           socket.close();
           fail(everJoined && msg.reason === 'Wrong password.'
             ? 'The host restarted the game, so the password changed. Ask for the new one.'
+            : everJoined && msg.reason.startsWith('No game is running') ? 'The game has ended.'
             : msg.reason);
         }
+        return;
+      }
+      // From the relay, not the game: the lobby around it.
+      if (msg.t === 'created') {
+        password = msg.code; // reconnects join the game this created
+        create = false;
+        everJoined = true; // in the game from here on: a dropped connection is retried
+        retryMs = 1000;
+        onCreated?.(msg.code);
+        return;
+      }
+      if (msg.t === 'lobby') {
+        everJoined = true;
+        retryMs = 1000;
+        if (ready || joined) {
+          // The host dropped out mid-game. The relay keeps this connection and joins it again when they're back.
+          ready = joined = false;
+          clearLiveLayers();
+          setStatus(WAITING_TEXT[msg.state] ?? 'Waiting for the host…', 'warning');
+        } else {
+          setStatus(WAITING_TEXT[msg.state] ?? 'Waiting for the host…', 'connecting');
+          onWaiting?.(msg.state);
+        }
+        return;
+      }
+      if (msg.t === 'ended') {
+        closedByUs = true;
+        socket.close();
+        fail(msg.reason || 'The game has ended.');
         return;
       }
       if (!joined) return;
@@ -2003,6 +1968,11 @@ function connectToGame({ server, password, name, onJoined, onJoinFailed }) {
     close() {
       closedByUs = true;
       socket?.close();
+    },
+    /** Leaves; a game created here that no host has taken yet is ended, so the relay is free again at once. */
+    cancel() {
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ t: 'cancel' }));
+      this.close();
     },
   };
 }

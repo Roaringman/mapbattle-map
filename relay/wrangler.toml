@@ -1,0 +1,12 @@
+name = "mapbattle-relay"
+main = "worker.js"
+compatibility_date = "2025-10-01"
+
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "RelayRoom"
+
+# SQLite-backed Durable Objects are the kind the Workers free plan offers.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom"]

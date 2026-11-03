@@ -20,53 +20,125 @@ a clicked point, and the single `welcome.spawnZone` became the list `welcome.spa
 ## Transport
 
 - WebSocket, text frames, one JSON object per message, `t` is the message type.
-- Host side: the game listens on `ws://localhost:8090`; friends reach it through a Cloudflare quick tunnel as
-  `wss://<random>.trycloudflare.com`. The invite link passes it as `?server=wss://…`.
-- The game accepts browser origins `localhost` and those in `MapSocketServer.allowedOrigins`
+- **Through the relay** (the new way, see [Relay](#relay)): pages connect to `wss://<relay>/play`, the game to
+  `wss://<relay>/host`. The relay checks browser origins.
+- **Direct** (today's game, until it moves to the relay): the game listens on `ws://localhost:8090`; friends reach it
+  through a Cloudflare quick tunnel as `wss://<random>.trycloudflare.com`, passed in the invite link as
+  `?server=wss://…`. The game accepts browser origins `localhost` and those in `MapSocketServer.allowedOrigins`
   (`https://roaringman.github.io`). Other origins are refused during the handshake.
+- Sections 1–3 are the same either way: the relay passes them through.
 
-## Lobby: who creates the game
+## Relay
 
-Both sides implement this: the game's start menu (`GameLobby`), the code check (`MapAccess.TryParseCode`) and the
-publish (`MapRendezvous`), and the page's lobby, join form and waiting view.
+> **Status:** in use. The relay (`relay/` in this repository) runs at `wss://mapbattle-relay.mapbattle.workers.dev`;
+> the game hosts through it (`MapRelayLink`), and the map page joins through it. The game can still host itself
+> through a tunnel (relay switched off), which the page reaches with `?server=`.
 
-The game always runs on the FPS player's PC (it is the server and the tunnel). Either player can **create** it:
+Everyone connects **out** to one relay, so nothing listens on the FPS player's PC and nobody needs a tunnel:
 
-| Created by | What they share | What the other side does |
+```
+map pages ──/play──┐
+                   ├── relay (Cloudflare Worker, one Durable Object) ── one game room
+the game ──/host───┘
+```
+
+- **Roles.** The **host** is the *authority*: whatever runs the simulation and speaks the map protocol (sections
+  1–3) to map players. Today that is the Unity game on the FPS player's PC. Later it can be a simulation running in
+  the cloud: it connects to `/host` the same way and the map page doesn't change. (An FPS client that is not the
+  authority would be a third role, with its own protocol; not designed yet.)
+- **One game at a time.** The relay has exactly one room: at most **one host and four map players**, and no second
+  game while one exists (`create` and `host` with another code are refused). This keeps the relay well inside the
+  Cloudflare free tier.
+- **The relay runs the lobby and then only routes.** It checks codes, limits and who may create; once a map player is
+  handed to the host, the relay passes messages through without reading them. The host still gets each map player's
+  `join` and can check it as before.
+
+Endpoints, on the relay's address (`wss://mapbattle-relay.mapbattle.workers.dev`; `ws://localhost:8787` for
+`node relay/dev-server.mjs`):
+
+| Path | What |
+|---|---|
+| `GET /status` | `{ "state": "idle" \| "waitingForHost" \| "playing" \| "hostAway", "maps": 2, "maxMaps": 4 }`, for the lobby page. CORS open. |
+| WebSocket `/play` | Map players. Only from allowed origins (`https://roaringman.github.io`, `localhost:8080`). |
+| WebSocket `/host` | The host. |
+
+### The game, from either side
+
+| Created by | How | The invite |
 |---|---|---|
-| **FPS player** (in the game's lobby: *Create game*) | Link `…/mapbattle-map/?server=wss://…` + the code (the session password) the game generated | Map players open the link and enter the code. |
-| **Map player** (the page opened without `?server`/`?join`: *Create a game*) | Link `…/mapbattle-map/?join` + a code the **page** generated | The FPS player chooses *Join game* in the game's lobby and enters the code; the game then hosts with that code as its session password. Other map players open the link and enter the code. |
+| **Map player** | Page lobby: *Create a game*. The relay makes the code; the room waits for a host. | Link `…/mapbattle-map/?join` + code. The FPS player enters the code in the game (*Join game*), the game connects to `/host` with it. |
+| **FPS player** | Game lobby: *Create game*. The game makes the code (its password) and connects to `/host` with it. | Link `…/mapbattle-map/?join` + code. Map players enter the code. |
 
-When the map creates the game the page doesn't know the host's tunnel address, so the game announces it on a
-**rendezvous**, a public pub/sub topic named after the code:
+Codes are 12 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` shown as `XXXX-XXXX-XXXX`; case, spaces and dashes
+don't count (the same normalising as the password). The code is the password for the whole game.
 
-1. **Code.** 12 characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`, shown as `XXXX-XXXX-XXXX` (60 random bits).
-   Normalised like the password: upper case, spaces and dashes removed. In *Join game* the game takes the code
-   as its session password (instead of generating one) and starts the tunnel as usual.
-2. **Topic.** `mapbattle-` + the first 32 hex digits (lower case) of SHA-256 of the UTF-8 string
-   `mapbattle:<normalised code>`. Example: code `UPGD-Y48J-TM9B` → `mapbattle-0990d0c515ee75e26af05786f18c2854`.
-   The hash keeps the code (the password) off the rendezvous.
-3. **Publish (game).** Once the tunnel address is known, `POST https://ntfy.sh/<topic>` with this body
-   (plain text, no auth; ntfy.sh caches it for hours, so a page that starts listening later still gets it). The game
-   waits about 12 s after the tunnel reports its address (`MapRendezvous.announceDelaySeconds`): a waiting page
-   connects at once, and a resolver asked about a brand-new `trycloudflare.com` name in its first seconds was seen
-   to answer "no such host" and keep answering that for minutes. Without a tunnel (cloudflared missing or off) it
-   publishes `ws://localhost:8090`, which only a page on the host's PC can use:
+### Map player ↔ relay (`/play`)
 
-   ```json
-   { "t": "hostReady", "server": "wss://<random>.trycloudflare.com", "protocolVersion": 2 }
-   ```
+The first message (within 15 s) is `create` or the usual `join`. Everything else is the map protocol.
 
-   Publish again if the address changes. The game **should** also publish for games the FPS player created, so a map
-   player can join with the code alone (the page's server field is optional).
-4. **Listen (page).** `GET https://ntfy.sh/<topic>/json?since=all`: a stream of JSON lines; lines with
-   `"event": "message"` carry the body above in `message`. The newest `hostReady` wins. The page connects to
-   `server` and sends the usual `join` with the code as `password`. It keeps retrying while the address doesn't
-   answer yet (a fresh quick tunnel can take a few seconds) and stops listening once joined.
-   It accepts only `wss://host` addresses (`ws://localhost` for testing).
+```json
+{ "t": "create", "name": "Anna" }                    // client → relay: start a game
+{ "t": "created", "code": "UPGD-Y48J-TM9B" }         // relay → client: the game's code; keep it to reconnect
+{ "t": "lobby", "state": "waitingForHost" }          // relay → client: no host yet (or "hostAway": it dropped out)
+{ "t": "cancel" }                                    // client → relay: the creator gives up before a host came
+{ "t": "ended", "reason": "The host left the game." } // relay → client: the game is over; the relay then closes
+```
 
-The rendezvous only carries the address; the code is still what lets anyone in, checked by `join` as before.
-For testing, a page on `localhost` takes `?rendezvous=http://localhost:…` in place of `https://ntfy.sh`.
+- `join` with the right code: if the host is there the relay hands the player over at once and the **game** answers
+  (`joinResult`, `welcome`, …); otherwise the relay says `lobby` and hands the player over when the host comes.
+- The relay refuses with the usual `joinResult` `ok: false` and closes a second later: `Wrong password.`,
+  `No game is running. Create one from the lobby.`, `A game is already running. Join it with its code.` (to
+  `create`), `The game is full (4 map players).`, `Too many wrong passwords. Try again in a minute.` (10 wrong codes
+  within a minute, for everyone), `Send the password first.`
+- **Host drops out:** map players stay connected and get `lobby` `hostAway`; the page clears the live layers and
+  waits. When the host is back, the relay joins them again (same `join`), so they get `joinResult` and `welcome`
+  as after a reconnect. If it isn't back within 2 minutes the game ends.
+- Messages over 64 KB close the connection, as before. While no host is there, the relay answers `ping` itself.
+
+### Host ↔ relay (`/host`): the host link
+
+Every frame is a **route line, a newline, then the payload**, so the relay routes without parsing game messages:
+
+| Route | Direction | Payload |
+|---|---|---|
+| `relay` | both | A control message for/from the relay (below). |
+| `from:3` | relay → host | A message from map player 3, exactly as the page sent it. |
+| `to:3` | host → relay | A message for map player 3. |
+| `to:1,3` | host → relay | The same message for players 1 and 3. |
+| `to:*` | host → relay | For every map player handed to the host. One relay message however many players: use it for `state`. |
+
+```
+relay
+{"t":"host","code":"UPGD-Y48J-TM9B","protocolVersion":2}
+```
+
+Control messages (`relay` route):
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `host` `code`, `protocolVersion` | host → relay | First message, within 15 s. Starts the game with that code, or takes the map-created game that has it. |
+| `hosting` `ok`, `code`, `maxMaps`, `reason` | relay → host | Reply. `ok: false`: `Another game is running.` or `The code is too short.`; then closed. On `ok: true` the relay sends a `from:N` `join` for every map player already waiting (the creator's carries the code as `password`). |
+| `peerLeft` `peer` | relay → host | Map player `peer` disconnected. |
+| `kick` `peer`, `reason` | host → relay | Close map player `peer` (after a refused `joinResult`, say). |
+| `end` `reason` | host → relay | The game is over: map players get `ended`, the room is free. Send it when the FPS player quits. |
+| `ended` `reason` | relay → host | The relay ended the game. |
+| `ping` / `pong` | host → relay / back | Liveness. |
+
+A host that drops out may reconnect with the same code within 2 minutes and carries on (a new host connection with
+the same code replaces an old one). Map player ids count up for the life of the game and are never reused.
+
+**What the game has to change** (it has no listening socket any more, so no tunnel, no origin check and no
+`allowedOrigins`):
+
+1. Lobby: *Create game* (make the code as the password is made today) and *Join game* (type a code from the map).
+   Either way, connect to `wss://<relay>/host` and send `host`. Invite: `https://roaringman.github.io/mapbattle-map/?join` + code.
+2. Treat each `from:N` as one map connection: the first is its `join`; reply with `to:N`. Send `state` once with
+   `to:*` (every map player sees the same state). On `peerLeft`, forget that player.
+3. Keep checking `join` (password, the four-player limit) as today; refuse with `joinResult` and `kick`.
+4. On quitting, send `end`. On losing the link, reconnect with the same code (within 2 minutes).
+
+Pages still accept `?server=wss://…` for a game that hosts itself; that path is the old one and goes away once the
+game uses the relay.
 
 ## Conventions
 

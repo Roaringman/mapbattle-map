@@ -124,5 +124,9 @@ await creator.next();
 creator.send({ t: 'cancel' });
 check((await creator.next())?.t === 'ended' && (await status()).state === 'idle', 'the creator can cancel before a host comes');
 
+const log = await (await fetch(relay.replace(/^ws/, 'http') + '/log')).text();
+check(log.includes('handed to the host') && !log.includes(code) && !log.includes('Bo'),
+  '/log has the lobby events, without codes or names');
+
 console.log(failures ? `${failures} check(s) failed` : 'all checks passed');
 process.exit(failures ? 1 : 0);

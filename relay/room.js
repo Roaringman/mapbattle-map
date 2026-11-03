@@ -14,6 +14,19 @@ const MAX_MAP_MESSAGE = 64 * 1024;
 const LOCKOUT_GUESSES = 10; // wrong codes within LOCKOUT_MS lock joining for LOCKOUT_MS (for everyone)
 const LOCKOUT_MS = 60_000;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 letters and digits, none that look alike
+const STATS_MS = 30_000; // one timing line per this while a game is played (logs are per line, not per message)
+const LOG_LINES = 300; // kept for GET /log: over two hours of stats lines
+
+// What one stats window measured. The relay never parses game messages; it only looks at how they start.
+/** State frames per second, from the first one in the window (players may join partway). */
+function stateRate(s) {
+  return s.states > 1 ? ((s.states - 1) / ((s.lastState - s.firstState) / 1000)).toFixed(1) : String(s.states);
+}
+
+function newStats(now) {
+  return { from: now, states: 0, firstState: 0, lastState: 0, maxStateGap: 0, hostFrames: 0, hostBytes: 0, maxFrame: 0,
+    mapMessages: 0, replies: 0, replyTotal: 0, replyMax: 0 };
+}
 
 /** Case, spaces and dashes don't count, as in the game's password check. */
 export function normaliseCode(code) {
@@ -41,11 +54,29 @@ export class Room {
     this.now = now;
     this.log = log;
     this.session = null; // { code, state: 'waitingForHost' | 'playing' | 'hostAway', timers }
+    this.stats = null; // timing for the current stats window, while a game is played (newStats)
+    this.lines = []; // recent log lines for GET /log (note)
     this.host = null; // the connection hosting the session
     this.peers = new Map(); // map-player id -> connection, in the session
     this.nextPeer = 1;
     this.wrongGuesses = [];
     this.lockedUntil = 0;
+  }
+
+  /**
+   * Logs a line and keeps it for GET /log. Cloudflare doesn't show a Durable Object's console output while its
+   * WebSockets are open (the whole game), so the recent lines are kept here too. /log is public: lines never carry
+   * a code or a player name.
+   */
+  note(text) {
+    this.lines.push(`${new Date(this.now()).toISOString()} ${text}`);
+    if (this.lines.length > LOG_LINES) this.lines.shift();
+    this.log(text);
+  }
+
+  /** The recent log lines, oldest first, for GET /log. */
+  recentLog() {
+    return this.lines.join('\n') + '\n';
   }
 
   /** For the lobby page: is a game running, and how full is it. */
@@ -78,6 +109,7 @@ export class Room {
     clearTimeout(conn.firstTimer);
     if (conn.role === 'map' && conn.inSession) {
       this.peers.delete(conn.id);
+      if (this.session) this.note(`map player ${conn.id} left`);
       if (conn.forwarded && this.host) this.host.socket.send(`relay\n${json({ t: 'peerLeft', peer: conn.id })}`);
     } else if (conn === this.host) {
       this.host = null;
@@ -91,7 +123,14 @@ export class Room {
   mapMessage(conn, text) {
     if (text.length > MAX_MAP_MESSAGE) return this.drop(conn, 1009, 'Message too big');
     if (conn.inSession) {
-      if (conn.forwarded && this.host) return this.host.socket.send(`from:${conn.id}\n${text}`);
+      if (conn.forwarded && this.host) {
+        if (this.stats) {
+          this.stats.mapMessages++;
+          // A spawn always gets its own answer (spawnResult): its round trip through the game is the reply time.
+          if (!conn.waitingSince && text.startsWith('{"t":"spawn"')) conn.waitingSince = this.now();
+        }
+        return this.host.socket.send(`from:${conn.id}\n${text}`);
+      }
       // Not handed to a host (yet, or the host is away): the relay answers the little there is to answer.
       const msg = text.length < 100 ? safeParse(text) : null;
       if (msg?.t === 'ping') conn.socket.send(json({ t: 'pong' }));
@@ -119,7 +158,7 @@ export class Room {
     this.admit(conn);
     conn.socket.send(json({ t: 'created', code }));
     conn.socket.send(json({ t: 'lobby', state: 'waitingForHost' }));
-    this.log(`created ${code} by map player ${conn.id}`);
+    this.note(`game created by map player ${conn.id}`);
   }
 
   join(conn, msg, text) {
@@ -147,6 +186,10 @@ export class Room {
   /** Hands a map player over to the host: from now on the host answers it, starting with its join. */
   forward(conn) {
     conn.forwarded = true;
+    conn.forwardedAt = this.now();
+    conn.welcomed = false;
+    conn.waitingSince = 0;
+    this.note(`map player ${conn.id} handed to the host`);
     this.host.socket.send(`from:${conn.id}\n${conn.joinText}`);
   }
 
@@ -186,6 +229,54 @@ export class Room {
     const targets = to === '*' ? [...this.peers.values()]
       : to.split(',').map((id) => this.peers.get(Number(id))).filter(Boolean);
     for (const peer of targets) if (peer.forwarded) peer.socket.send(payload);
+    if (this.stats) this.measure(payload, targets);
+  }
+
+  /** Timing from a host frame, by how its payload starts (cheap, and never more than that). */
+  measure(payload, targets) {
+    const s = this.stats;
+    const now = this.now();
+    s.hostFrames++;
+    s.hostBytes += payload.length;
+    s.maxFrame = Math.max(s.maxFrame, payload.length);
+    if (payload.startsWith('{"t":"state"')) {
+      // The game sends state 10 times a second: a long gap is the game (or its link) stalling.
+      if (s.lastState) s.maxStateGap = Math.max(s.maxStateGap, now - s.lastState);
+      else s.firstState = now;
+      s.lastState = now;
+      s.states++;
+    } else if (payload.startsWith('{"t":"spawnResult"')) {
+      for (const peer of targets) {
+        if (!peer.waitingSince) continue;
+        const ms = now - peer.waitingSince;
+        peer.waitingSince = 0;
+        s.replies++;
+        s.replyTotal += ms;
+        s.replyMax = Math.max(s.replyMax, ms);
+      }
+    } else if (payload.startsWith('{"t":"welcome"')) {
+      for (const peer of targets) {
+        if (peer.welcomed) continue;
+        peer.welcomed = true;
+        this.note(`welcome to map player ${peer.id}: ${now - peer.forwardedAt} ms after hand-over, ` +
+          `${Math.round(payload.length / 1024)} KB`);
+      }
+    }
+  }
+
+  logStats() {
+    const s = this.stats;
+    if (!s || this.session?.state !== 'playing') return;
+    const now = this.now();
+    const seconds = (now - s.from) / 1000;
+    if (s.hostFrames || s.mapMessages) {
+      this.note(`stats ${Math.round(seconds)} s, ${this.peers.size} map player(s): ` +
+        `state ${stateRate(s)}/s, longest gap ${s.maxStateGap} ms; ` +
+        `host sent ${s.hostFrames} frames, ${Math.round(s.hostBytes / 1024)} KB, largest ${Math.round(s.maxFrame / 1024)} KB; ` +
+        `map players sent ${s.mapMessages}; ` +
+        (s.replies ? `spawn round trip avg ${Math.round(s.replyTotal / s.replies)} ms, max ${s.replyMax} ms` : 'no spawns'));
+    }
+    this.stats = newStats(now);
   }
 
   attachHost(conn, msg) {
@@ -197,7 +288,7 @@ export class Room {
     }
     if (!this.session) {
       this.session = { code, state: 'playing', timers: {} };
-      this.log(`created ${code} by the host`);
+      this.note('game created by the host');
     } else if (normaliseCode(code) !== normaliseCode(this.session.code)) {
       reply({ ok: false, reason: 'Another game is running.' });
       return this.drop(conn, 1008, 'Another game');
@@ -209,9 +300,11 @@ export class Room {
     clearTimeout(this.session.timers.grace);
     clearTimeout(this.session.timers.empty);
     this.session.state = 'playing';
+    this.stats = newStats(this.now());
+    if (!this.session.timers.stats) this.session.timers.stats = setInterval(() => this.logStats(), STATS_MS);
     reply({ ok: true, code: this.session.code, maxMaps: MAX_MAPS });
     for (const peer of this.peers.values()) this.forward(peer);
-    this.log(`host attached to ${this.session.code}, ${this.peers.size} map player(s) waiting`);
+    this.note(`host attached, ${this.peers.size} map player(s) waiting`);
   }
 
   control(conn, msg) {
@@ -233,7 +326,7 @@ export class Room {
       peer.socket.send(json({ t: 'lobby', state: 'hostAway' }));
     }
     this.session.timers.grace = setTimeout(() => this.end('The host left the game.'), HOST_GRACE_MS);
-    this.log('host left; waiting for it to come back');
+    this.note('host left; waiting for it to come back');
   }
 
   // --- The session as a whole ----------------------------------------------------------------------------------
@@ -246,8 +339,10 @@ export class Room {
 
   end(reason) {
     if (!this.session) return;
-    this.log(`ended ${this.session.code}: ${reason}`);
-    for (const timer of Object.values(this.session.timers)) clearTimeout(timer);
+    this.logStats(); // the last, partial window
+    this.stats = null;
+    this.note(`ended: ${reason}`);
+    for (const timer of Object.values(this.session.timers)) { clearTimeout(timer); clearInterval(timer); }
     this.session = null;
     for (const peer of this.peers.values()) {
       peer.socket.send(json({ t: 'ended', reason }));

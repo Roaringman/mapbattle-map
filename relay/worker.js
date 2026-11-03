@@ -2,6 +2,7 @@
 // room: one game at a time, which keeps it well inside the free tier. Deploy with `npx wrangler deploy` in this folder.
 //
 //   GET /status        lobby info for the page: { state, maps, maxMaps }
+//   GET /log           the room's recent log lines (lobby events, timings; no codes or names)
 //   WebSocket /play    map players (browsers from ALLOWED_ORIGINS)
 //   WebSocket /host    the authority: the Unity game today
 import { Room } from './room.js';
@@ -18,6 +19,9 @@ export class RelayRoom {
   async fetch(request) {
     const { pathname } = new URL(request.url);
     if (pathname === '/status') return Response.json(this.room.status(), { headers: CORS });
+    if (pathname === '/log') {
+      return new Response(this.room.recentLog(), { headers: { ...CORS, 'Content-Type': 'text/plain; charset=utf-8' } });
+    }
 
     const role = { '/play': 'map', '/host': 'host' }[pathname];
     if (!role) return new Response('Not found', { status: 404 });

@@ -59,6 +59,7 @@ Endpoints, on the relay's address (`wss://mapbattle-relay.mapbattle.workers.dev`
 | Path | What |
 |---|---|
 | `GET /status` | `{ "state": "idle" \| "waitingForHost" \| "playing" \| "hostAway", "maps": 2, "maxMaps": 4 }`, for the lobby page. CORS open. |
+| `GET /log` | The room's recent log lines (plain text, newest last): lobby events, the time each `welcome` took, and a stats line every 30 s of play (state rate and longest gap, traffic, `spawn` round trip). No codes or player names. For finding out why a game was slow. |
 | WebSocket `/play` | Map players. Only from allowed origins (`https://roaringman.github.io`, `localhost:8080`). |
 | WebSocket `/host` | The host. |
 

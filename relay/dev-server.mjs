@@ -13,8 +13,11 @@ const room = new Room({
 const server = createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cache-Control', 'no-store');
-  if (new URL(req.url, 'http://x').pathname === '/status') {
+  const { pathname } = new URL(req.url, 'http://x');
+  if (pathname === '/status') {
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(room.status()));
+  } else if (pathname === '/log') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' }).end(room.recentLog());
   } else {
     res.writeHead(404).end('Not found');
   }

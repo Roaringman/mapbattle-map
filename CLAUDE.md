@@ -25,6 +25,12 @@ Never read or reference files from the Unity project; if the client needs data, 
 The relay passes game messages through unread: game rules stay in the game, as for the page. Keep `room.js` free of
 platform APIs so the Worker and the Node dev server share it.
 
+Relay logs: https://mapbattle-relay.mapbattle.workers.dev/log (last 300 lines, kept in memory, lost when the relay
+restarts or is redeployed). Cloudflare's own logs (`wrangler tail`, Workers Logs) don't show the Durable Object's
+output while its WebSockets are open, i.e. during a game, so `room.note()` keeps the lines for `/log`. They are
+public: never put a code or a player name in one. The game logs the other end of the link in the Unity console
+(`[MapBattle] Relay link, last 30 s: …`).
+
 Libraries: MapLibre GL JS 4.7.1 and Turf 7.1.0 (route/play-area crossings for the plane minigame) from unpkg, pinned. No npm, no bundler; keep it that way unless there's a real need.
 
 ## Running

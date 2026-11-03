@@ -61,6 +61,8 @@ npx wrangler deploy
 It runs at `wss://mapbattle-relay.mapbattle.workers.dev` (`RELAY_URL` in `map.js`); a fork deploys its own and puts
 that address there. On Windows PowerShell with scripts disabled, use `npx.cmd` instead of `npx`.
 
+What happened in the last games, with timings: https://mapbattle-relay.mapbattle.workers.dev/log
+
 Testing without Cloudflare or Unity: `node relay/dev-server.mjs` (a local relay on port 8787, no packages needed),
 `node relay/test.mjs` (end-to-end checks against it) and `node relay/mock-host.mjs [relay] [code]` (a fake game).
 The page on `localhost` uses the local relay by default.
